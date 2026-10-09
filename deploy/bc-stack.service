@@ -1,0 +1,13 @@
+# ~/.config/systemd/user/bc-stack.service  (cp + systemctl --user enable; linger keeps it at boot)
+[Unit]
+Description=boostcontent_backend: wait for the tailnet IP, then docker compose up
+After=default.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=%h/Documents/dev/boostcontent_backend/deploy/boot-up.sh
+TimeoutStartSec=1200
+
+[Install]
+WantedBy=default.target
