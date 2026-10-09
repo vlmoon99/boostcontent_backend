@@ -108,6 +108,7 @@ services:
       PGRST_DB_SCHEMAS: admin_api
       PGRST_DB_ANON_ROLE: bc_admin_anon
       PGRST_JWT_SECRET: ${ADMIN_JWT_SECRET}
+      PGRST_DB_PRE_REQUEST: private.admin_pre_request     # tokens die when the password is reset
       PGRST_DB_MAX_ROWS: "1000"
     depends_on:
       configure: {condition: service_completed_successfully}
