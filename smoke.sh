@@ -70,6 +70,12 @@ if docker ps --format '{{.Names}}' | grep -q '^bc-db$'; then
   [ "$SG" = "copied,edited" ] && ok "signals: $SG" || bad "signals: $SG"
 fi
 api rpc/delete_business -d "{\"id\":\"$BIZ\"}" >/dev/null
+# leave no test users behind (the admin's user list is the owner's view of real customers)
+if docker ps --format '{{.Names}}' | grep -q '^bc-db$'; then
+  ids=$(for t in "$TOKEN" "$OTHER"; do python3 -c "import sys,json,base64; p=sys.argv[1].split('.')[1]; print(json.loads(base64.urlsafe_b64decode(p+'='*(-len(p)%4)))['sub'])" "$t"; done | sed "s/.*/'&'/" | paste -sd,)
+  docker exec bc-db psql -U postgres -d boostcontent -qc "delete from private.accounts where id in ($ids); delete from auth.users where id in ($ids);" \
+    && echo "  (test users removed)"
+fi
 
 echo; echo "RESULT: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
