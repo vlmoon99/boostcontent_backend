@@ -148,6 +148,17 @@ services:
     command: ["tunnel", "--no-autoupdate", "run"]
     depends_on: [caddy]
 
+  backup:                         # pg_dump at start and every 24 h; keeps 14 days
+    image: postgres:17-bookworm
+    container_name: bc-backup
+    restart: unless-stopped
+    environment:
+      PGPASSWORD: ${DB_PASSWORD}
+    volumes: ["${BACKUP_DIR:-./.data/backups}:/backups"]
+    entrypoint: ["bash", "-c", "while true; do f=/backups/boostcontent-$$(date -u +%Y%m%dT%H%M).dump; pg_dump -h db -U postgres -Fc boostcontent > $$f.tmp && mv $$f.tmp $$f && echo backup $$f $$(du -h $$f | cut -f1); find /backups -name 'boostcontent-*.dump' -mtime +14 -delete; sleep 86400; done"]
+    depends_on:
+      db: {condition: service_healthy}
+
 volumes:
   db_data:
   garage_meta:
