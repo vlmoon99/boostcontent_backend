@@ -1,0 +1,36 @@
+# The only HTTP entry points. :3100 is what the Cloudflare tunnel already sends boostcontent.io to;
+# :3200 is the owner console, published on the tailnet IP only (compose ports).
+{
+	admin off
+	auto_https off
+}
+
+:3100 {
+	handle /auth/v1/* {
+		uri strip_prefix /auth/v1
+		reverse_proxy auth:9999
+	}
+	handle /rest/v1/* {
+		uri strip_prefix /rest/v1
+		reverse_proxy rest:3000
+	}
+	# S3 path-style; the Host header passes through untouched, so pre-signed URLs verify in Garage
+	handle /bc-media/* {
+		reverse_proxy garage:3900
+	}
+	handle {
+		respond "BoostContent" 200
+	}
+}
+
+:3200 {
+	handle /api/* {
+		uri strip_prefix /api
+		reverse_proxy rest-admin:3000
+	}
+	handle {
+		root * /srv/admin
+		try_files {path} /index.html
+		file_server
+	}
+}

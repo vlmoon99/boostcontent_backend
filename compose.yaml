@@ -1,0 +1,153 @@
+# BoostContent backend: everything in one file, so the same stack runs on the Spark or any cloud VM.
+#   cp .env.example .env  (fill it)   docker compose up -d --build   scripts/garage-init.sh (first time)   ./smoke.sh
+# Public entry: cloudflared → caddy :3100 (/auth/v1 GoTrue, /rest/v1 PostgREST, /bc-media Garage).
+# Owner console: caddy :3200 on the tailnet IP only. Inference: LiteLLM at INFERENCE_URL (tailnet).
+name: bc
+
+services:
+  db:
+    build: ./db
+    image: bc/db:local
+    container_name: bc-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: boostcontent
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      AUTHENTICATOR_PASSWORD: ${AUTHENTICATOR_PASSWORD}
+      AUTH_DB_PASSWORD: ${AUTH_DB_PASSWORD}
+      ADMIN_AUTHENTICATOR_PASSWORD: ${ADMIN_AUTHENTICATOR_PASSWORD}
+    ports: ["127.0.0.1:5442:5432"]
+    volumes: ["db_data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d boostcontent"]
+      interval: 5s
+      retries: 30
+
+  migrate:
+    image: ghcr.io/amacneil/dbmate:2.28.0
+    container_name: bc-migrate
+    environment:
+      DATABASE_URL: postgres://postgres:${DB_PASSWORD}@db:5432/boostcontent?sslmode=disable
+      DBMATE_MIGRATIONS_DIR: /migrations
+      DBMATE_NO_DUMP_SCHEMA: "true"
+    volumes: ["./db/migrations:/migrations:ro"]
+    command: ["--wait", "up"]
+    depends_on:
+      db: {condition: service_healthy}
+
+  configure:                      # secrets + knobs → private.settings (idempotent, every `up`)
+    image: postgres:17-bookworm
+    container_name: bc-configure
+    environment:
+      PGPASSWORD: ${DB_PASSWORD}
+      S: >-
+        inference_url=${INFERENCE_URL}
+        inference_key=${INFERENCE_KEY}
+        s3_public_endpoint=${S3_PUBLIC_ENDPOINT}
+        s3_internal_endpoint=${S3_INTERNAL_ENDPOINT}
+        s3_bucket=${S3_BUCKET}
+        s3_region=garage
+        s3_access_key=${S3_ACCESS_KEY}
+        s3_secret_key=${S3_SECRET_KEY}
+        admin_jwt_secret=${ADMIN_JWT_SECRET}
+    volumes: ["./scripts/configure.sh:/configure.sh:ro"]
+    command: ["bash", "/configure.sh"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  auth:
+    image: supabase/gotrue:v2.177.0
+    container_name: bc-auth
+    restart: unless-stopped
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      PORT: "9999"
+      API_EXTERNAL_URL: ${PUBLIC_URL}/auth/v1
+      GOTRUE_SITE_URL: ${PUBLIC_URL}
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${AUTH_DB_PASSWORD}@db:5432/boostcontent?search_path=auth
+      GOTRUE_JWT_SECRET: ${JWT_SECRET}
+      GOTRUE_JWT_EXP: "3600"
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_DISABLE_SIGNUP: "false"
+      GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED: "true"     # guest mode, the only sign-in for now
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "false"
+      GOTRUE_EXTERNAL_PHONE_ENABLED: "false"
+      GOTRUE_RATE_LIMIT_ANONYMOUS_USERS: "30"             # per hour per IP
+      GOTRUE_RATE_LIMIT_HEADER: CF-Connecting-IP
+      GOTRUE_SECURITY_REFRESH_TOKEN_ROTATION_ENABLED: "true"
+    depends_on:
+      db: {condition: service_healthy}
+
+  rest:
+    image: postgrest/postgrest:v13.0.4
+    container_name: bc-rest
+    restart: unless-stopped
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${AUTHENTICATOR_PASSWORD}@db:5432/boostcontent
+      PGRST_DB_SCHEMAS: api
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      PGRST_JWT_AUD: authenticated
+      PGRST_DB_MAX_ROWS: "500"
+      PGRST_OPENAPI_MODE: ignore-privileges
+      PGRST_DB_CHANNEL_ENABLED: "true"
+    depends_on:
+      configure: {condition: service_completed_successfully}
+
+  rest-admin:
+    image: postgrest/postgrest:v13.0.4
+    container_name: bc-rest-admin
+    restart: unless-stopped
+    environment:
+      PGRST_DB_URI: postgres://admin_authenticator:${ADMIN_AUTHENTICATOR_PASSWORD}@db:5432/boostcontent
+      PGRST_DB_SCHEMAS: admin_api
+      PGRST_DB_ANON_ROLE: bc_admin_anon
+      PGRST_JWT_SECRET: ${ADMIN_JWT_SECRET}
+      PGRST_DB_MAX_ROWS: "1000"
+    depends_on:
+      configure: {condition: service_completed_successfully}
+
+  garage:
+    image: dxflrs/garage:v2.1.0
+    container_name: bc-garage
+    restart: unless-stopped
+    environment:
+      GARAGE_RPC_SECRET: ${GARAGE_RPC_SECRET}
+      GARAGE_ADMIN_TOKEN: ${GARAGE_ADMIN_TOKEN}
+    ports:
+      - "127.0.0.1:3900:3900"
+      - "${TAILNET_IP}:3900:3900"         # the inference machines fetch/put through pre-signed URLs
+    volumes:
+      - "./edge/garage.toml:/etc/garage.toml:ro"
+      - "garage_meta:/var/lib/garage/meta"
+      - "garage_data:/var/lib/garage/data"
+
+  caddy:
+    image: caddy:2.10.0-alpine
+    container_name: bc-caddy
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3100:3100"             # cloudflared → here
+      - "${TAILNET_IP}:3200:3200"         # owner console, tailnet only
+    volumes:
+      - "./edge/Caddyfile:/etc/caddy/Caddyfile:ro"
+      - "./admin/dist:/srv/admin:ro"
+    depends_on: [auth, rest, rest-admin, garage]
+
+  cloudflared:
+    image: cloudflare/cloudflared:2025.9.1
+    container_name: bc-cloudflared
+    restart: unless-stopped
+    network_mode: host                    # the tunnel's public hostname points at localhost:3100
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+    command: ["tunnel", "--no-autoupdate", "run"]
+    depends_on: [caddy]
+
+volumes:
+  db_data:
+  garage_meta:
+  garage_data:
