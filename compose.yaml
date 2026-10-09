@@ -78,8 +78,10 @@ services:
       GOTRUE_RATE_LIMIT_ANONYMOUS_USERS: "30"             # per hour per IP
       GOTRUE_RATE_LIMIT_HEADER: CF-Connecting-IP
       GOTRUE_SECURITY_REFRESH_TOKEN_ROTATION_ENABLED: "true"
+      GOTRUE_DB_CONN_MAX_IDLE_TIME: 60s                     # don't hand out connections a DB restart killed
+      GOTRUE_DB_CONN_MAX_LIFETIME: 10m
     depends_on:
-      db: {condition: service_healthy}
+      db: {condition: service_healthy, restart: true}
 
   rest:
     image: postgrest/postgrest:v13.0.4
@@ -126,15 +128,13 @@ services:
       - "garage_data:/var/lib/garage/data"
 
   caddy:
-    image: caddy:2.10.0-alpine
+    build: {context: ., dockerfile: edge/Dockerfile}
+    image: bc/caddy:local
     container_name: bc-caddy
     restart: unless-stopped
     ports:
       - "127.0.0.1:3100:3100"             # cloudflared → here
       - "${TAILNET_IP}:3200:3200"         # owner console, tailnet only
-    volumes:
-      - "./edge/Caddyfile:/etc/caddy/Caddyfile:ro"
-      - "./admin/dist:/srv/admin:ro"
     depends_on: [auth, rest, rest-admin, garage]
 
   cloudflared:
