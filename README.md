@@ -69,4 +69,5 @@ posts, quotas (per-user override), plans, failed jobs. Backed by a second PostgR
 
 Same compose on a VM. Or: managed Postgres (must allow pg_net + pg_cron, e.g. Supabase) + R2
 (`S3_*` endpoints → R2, same SigV4), and the inference gateway on its public domain (`INFERENCE_URL`).
-Nothing in the code knows where it runs.
+Nothing in the code knows where it runs. Stages, numbers and the move step by step:
+`../inference_system/docs/SCALING_AND_CLOUD.md`.
