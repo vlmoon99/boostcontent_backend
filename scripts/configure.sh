@@ -8,6 +8,10 @@ for kv in $S; do
   v=${v//\'/\'\'}
   sql+=" insert into private.settings(key, value) values ('$k', '$v') on conflict (key) do update set value = excluded.value, updated_at = now();"
 done
+if [ -n "${NODES:-}" ]; then                 # every node's storage, so a deleted account's pictures go everywhere
+  eps=$(for n in $NODES; do printf 'http://%s:3900,' "${n%%/*}"; done)
+  sql+=" insert into private.settings(key, value) values ('s3_node_endpoints', '${eps%,}') on conflict (key) do update set value = excluded.value, updated_at = now();"
+fi
 sql+=" commit;"
 psql -h db -U postgres -d boostcontent -v ON_ERROR_STOP=1 -qc "$sql"
 if [ -n "${REPL_PASSWORD:-}" ]; then      # the streaming-replication login for replica/ (idempotent)

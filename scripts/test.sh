@@ -1,11 +1,12 @@
 #!/bin/bash
-# pgTAP suite against the running bc-db. Every file is one transaction that rolls back.
+# pgTAP suite against the running bc-db (the MASTER: a follower is read-only). Every file is one transaction
+# that rolls back. DB_CONTAINER=<name> runs it against another container.
 # A file passes only if it ran its whole plan and no assertion failed.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 fail=0; total=0
 for f in db/tests/*.sql; do
-  out=$(docker exec -i bc-db psql -X -q -tA -U postgres -d boostcontent -v ON_ERROR_STOP=1 < "$f" 2>&1)
+  out=$(docker exec -i "${DB_CONTAINER:-bc-db}" psql -X -q -tA -U postgres -d boostcontent -v ON_ERROR_STOP=1 < "$f" 2>&1)
   plan=$(echo "$out" | grep -oE '^1\.\.[0-9]+' | cut -d. -f3)
   oks=$(echo "$out" | grep -cE '^ok ')
   echo "$out" | grep -E '^(ok|not ok)' | sed "s|^|$(basename "$f"): |"

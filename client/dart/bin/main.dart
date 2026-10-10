@@ -4,12 +4,14 @@ import 'package:bc_client/bc_api.dart';
 
 class MemoryStore implements TokenStore {
   ({String access, String refresh})? t;
+  String lastAccess = '';
   int writes = 0;
   @override
   Future<({String access, String refresh})?> read() async => t;
   @override
   Future<void> write(String a, String r) async {
     t = (access: a, refresh: r);
+    lastAccess = a;
     writes++;
   }
   @override
@@ -39,7 +41,10 @@ Future<void> main(List<String> args) async {
 
   final me = await api.me();
   print('ACCOUNT ${me['account_id']}');
-  check('me()', me['limits']['posts_month'] > 0, me['limits']);
+  check('me(): plan, limits, what is left', me['plan'] == 'free' && me['left']['posts'] == me['limits']['posts_month'] && me['onboarded_at'] == null,
+      '${me['plan']} ${me['limits']}');
+  final onb = await api.completeOnboarding();
+  check('completeOnboarding', onb['onboarded_at'] != null && (await api.completeOnboarding())['onboarded_at'] == onb['onboarded_at']);
 
   // a second instance on the same store = an app restart: same account, no new sign-up
   final again = BcApi(store, baseUrl: args.length > 1 ? args[1] : 'https://boostcontent.io');
@@ -50,10 +55,18 @@ Future<void> main(List<String> args) async {
   final both = await Future.wait([api.me(), api.businesses()]);
   check('expired token: two parallel calls, one refresh, both succeed', store.writes == 2 && both.length == 2, 'writes=${store.writes}');
 
-  final biz = await api.createBusiness(name: 'Dart check bakery', description: 'Homemade cakes in Kyiv', language: 'uk');
-  check('createBusiness', biz['profile_status'] == 'none');
-  check('updateBusiness (one field)', (await api.updateBusiness(biz['id'], name: 'Dart bakery'))['description'] == 'Homemade cakes in Kyiv');
-  check('businesses()', (await api.businesses()).single['name'] == 'Dart bakery');
+  final named = await api.createBusiness(name: 'Dart check bakery', description: 'Homemade cakes in Kyiv', language: 'ru', timezone: 'Europe/Kyiv');
+  check('createBusiness with a name and a zone', named['name'] == 'Dart check bakery' && named['timezone'] == 'Europe/Kyiv');
+  check('updateBusiness (one field)', (await api.updateBusiness(named['id'], name: 'Dart bakery'))['description'] == 'Homemade cakes in Kyiv');
+  check('updateBusiness (post language)', (await api.updateBusiness(named['id'], language: 'en'))['language'] == 'en');
+  check('400 bad_timezone', await codeOf(() => api.updateBusiness(named['id'], timezone: 'Mars/Phobos')) == '400 bad_timezone');
+  await api.deleteBusiness(named['id']);
+
+  // the onboarding path: no name, the device's UTC offset
+  final biz = await api.createBusiness(description: 'Sweet Corner: homemade cakes and pastries in Kyiv, pickup and delivery', language: 'uk', utcOffset: 180);
+  check('createBusiness without a name, with a UTC offset', biz['name'] == null && biz['timezone'] == '<+03:00>-03:00' && biz['profile_status'] == 'none', biz['timezone']);
+  check('businesses()', (await api.businesses()).single['id'] == biz['id']);
+  print('BUSINESS ${biz['id']}');
 
   final bytes = await File(args[0]).readAsBytes();
   final mediaId = await api.uploadPhoto(biz['id'], bytes);
@@ -66,32 +79,71 @@ Future<void> main(List<String> args) async {
   check('400 bad_n', await codeOf(() => api.generatePosts(biz['id'], n: 99)) == '400 bad_n');
   check('400 bad_content_type', await codeOf(() => api.uploadPhoto(biz['id'], bytes, contentType: 'application/pdf')) == '400 bad_content_type');
 
+  // a round of options: three are written, the user keeps one
   final t0 = DateTime.now();
-  final queued = await api.generatePosts(biz['id'], n: 1);
-  check('generatePosts queued', queued.single['status'] == 'queued');
+  final queued = await api.generatePosts(biz['id'], n: 3);
+  check('generatePosts queued 3 options', queued.length == 3 && queued.every((p) => p['status'] == 'queued'));
+  final batchId = queued.first['batch_id'] as String;
+  check('409 not_ready', await codeOf(() => api.choosePost(queued.first['id'])) == '409 not_ready');
   final seen = <String>{};
   List<Map<String, dynamic>> last = [];
-  await for (final rows in api.watchBatch(queued.single['batch_id'])) {
+  await for (final rows in api.watchBatch(batchId)) {
     last = rows;
-    seen.add(rows.single['status']);
+    seen.addAll(rows.map((r) => r['status'] as String));
   }
-  final post = last.single;
+  final usable = last.where((p) => p['status'] == 'ready' || p['status'] == 'partial').toList();
+  check('options finished in ${DateTime.now().difference(t0).inSeconds}s, statuses seen $seen', usable.length >= 2,
+      last.map((p) => '${p['status']}/${(p['images'] as List).where((i) => i['status'] == 'ready').length} img').toList());
+  final post = usable.firstWhere((p) => (p['images'] as List).any((i) => i['status'] == 'ready'));
   final images = (post['images'] as List).where((i) => i['status'] == 'ready').toList();
-  check('post finished in ${DateTime.now().difference(t0).inSeconds}s, statuses seen $seen', post['status'] == 'ready' && images.isNotEmpty,
-      '${images.length} images, hashtags ${post['hashtags']}');
   check('caption', (post['caption'] as String).length > 20, (post['caption'] as String).substring(0, 50));
+  final dl = await HttpClient().getUrl(Uri.parse(images.first['download_url'])).then((r) => r.close());
+  check('download_url answers as an attachment', dl.statusCode == 200 && (dl.headers.value('content-disposition') ?? '').startsWith('attachment'),
+      dl.headers.value('content-disposition'));
   final prof = await api.profile(biz['id']);
-  check('profile ready', prof['status'] == 'ready', (prof['data'] as Map).keys.toList());
+  final data = prof['data'] as Map;
+  check('profile ready, fixed shape', prof['status'] == 'ready' && data['customers'] is String && data['tone'] is String &&
+      data['best_days'] is List && data['brand_colors'] is List && data['business_name'] is String,
+      'best_days ${data['best_days']} brand_colors ${data['brand_colors']}');
+  final nowNamed = (await api.businesses()).single['name'];
+  check('the analysis named the business', nowNamed is String && nowNamed.isNotEmpty && nowNamed == data['business_name'], nowNamed);
+
+  final before = (await api.me())['used'];
+  final chosen = await api.choosePost(post['id']);
+  final after = (await api.me())['used'];
+  check('choosePost', chosen['chosen_at'] != null && chosen['passed_at'] == null);
+  check('a round costs one post and the chosen pictures', after['posts'] == 1 && after['images'] == images.length, 'before $before, after $after');
+  check('409 already_chosen', await codeOf(() => api.choosePost(usable.firstWhere((p) => p['id'] != post['id'])['id'])) == '409 already_chosen');
+  check('history shows the chosen post only', (await api.posts(biz['id'])).single['id'] == post['id'] && (await api.batch(batchId)).length == 3);
+  check('post(id)', (await api.post(post['id']))?['id'] == post['id'] && await api.post('00000000-0000-0000-0000-000000000000') == null);
 
   await api.postSignal(post['id'], 'copied');
-  check('editPost', (await api.editPost(post['id'], 'Мій текст', hashtags: ['#a', '#b']))['hashtags'].length == 2);
-  check('me() counts usage', (await api.me())['used']['posts'] == 1);
+  check('editPost', (await api.editPost(post['id'], 'Мій текст. Коротко, тепло і без знижок.', hashtags: ['#a', '#b']))['hashtags'].length == 2);
+  Map<String, dynamic>? learned;
+  for (var i = 0; i < 40 && learned == null; i++) {
+    await Future<void>.delayed(const Duration(seconds: 3));
+    learned = (await api.profile(biz['id']))['learned'] as Map<String, dynamic>?;
+  }
+  check('the backend learned from the choice', learned != null && learned['likes'] is List && learned['dislikes'] is List, learned);
+
   await api.deletePost(post['id']);
   check('deletePost', (await api.posts(biz['id'])).isEmpty);
   await api.deletePhoto(mediaId);
   check('deletePhoto', (await api.photos(biz['id'])).isEmpty);
-  await api.deleteBusiness(biz['id']);
-  check('deleteBusiness', (await api.businesses()).isEmpty);
+
+  final photoUrl = photos.single['download_url'] as String; // never fetched before, so no CDN copy of it exists
+  await api.deleteAccount();
+  check('deleteAccount clears the tokens', store.t == null);
+  final gone = BcApi(MemoryStore()..t = (access: both.isEmpty ? '' : store.lastAccess, refresh: 'none'), baseUrl: args.length > 1 ? args[1] : 'https://boostcontent.io');
+  await gone.start();
+  final goneCode = await codeOf(() => gone.me());
+  check('a deleted account is closed to its old token', goneCode?.endsWith('session_lost') ?? false, goneCode);
+  var status = 200;
+  for (var i = 0; i < 10 && status == 200; i++) {
+    await Future<void>.delayed(const Duration(seconds: 2));
+    status = (await HttpClient().getUrl(Uri.parse(photoUrl)).then((r) => r.close())).statusCode;
+  }
+  check('its pictures are gone from storage', status == 404, 'HTTP $status');
 
   final offline = BcApi(MemoryStore()..t = (access: 'x', refresh: 'y'), baseUrl: 'http://127.0.0.1:9');
   await offline.start();

@@ -141,31 +141,55 @@ class BcApi {
 
   // ---------------------------------------------------------------- account
 
-  /// {account_id, is_anonymous, month, limits: {posts_month, images_month, images_per_post}, used: {posts, images}}
+  /// {account_id, is_anonymous, plan, onboarded_at, month,
+  ///  limits: {posts_month, images_month, images_per_post}, used: {posts, images}, left: {posts, images}}
   Future<Map<String, dynamic>> me() async => (await rpc('me')) as Map<String, dynamic>;
+
+  /// Records that the user finished onboarding (the first call sets `onboarded_at`, later calls keep it).
+  /// Returns the new me().
+  Future<Map<String, dynamic>> completeOnboarding() async =>
+      (await rpc('complete_onboarding')) as Map<String, dynamic>;
+
+  /// Deletes the account for good: businesses, photos, posts, pictures and the sign-in itself.
+  /// The saved tokens are cleared; the next start() creates a new, empty guest.
+  Future<void> deleteAccount() async {
+    await rpc('delete_account');
+    _access = _refresh = null;
+    await _store.clear();
+  }
 
   // ---------------------------------------------------------------- businesses
 
   Future<List<Map<String, dynamic>>> businesses() => list('businesses', {'order': 'created_at.desc'});
 
+  /// [name] may be left out: the profile analysis then names the business (read it from businesses()
+  /// or from the profile's `business_name` once the profile is ready).
+  /// Time zone: pass an IANA [timezone] if you have one; otherwise the device's UTC offset is sent.
   Future<Map<String, dynamic>> createBusiness({
-    required String name,
+    String? name,
     String description = '',
-    String language = 'uk', // en | uk | ru
-    String timezone = 'Europe/Kyiv',
+    String language = 'uk', // en | uk | ru: the language of the captions
+    String? timezone,
+    int? utcOffset, // minutes east of UTC
   }) async =>
-      (await rpc('create_business',
-          {'name': name, 'description': description, 'language': language, 'timezone': timezone})) as Map<String, dynamic>;
+      (await rpc('create_business', {
+        if (name != null) 'name': name,
+        'description': description,
+        'language': language,
+        if (timezone != null) 'timezone': timezone,
+        if (timezone == null) 'utc_offset': utcOffset ?? DateTime.now().timeZoneOffset.inMinutes,
+      })) as Map<String, dynamic>;
 
-  /// Only the fields you pass are changed.
+  /// Only the fields you pass are changed. [language] changes the language of FUTURE posts.
   Future<Map<String, dynamic>> updateBusiness(String id,
-          {String? name, String? description, String? language, String? timezone}) async =>
+          {String? name, String? description, String? language, String? timezone, int? utcOffset}) async =>
       (await rpc('update_business', {
         'id': id,
         if (name != null) 'name': name,
         if (description != null) 'description': description,
         if (language != null) 'language': language,
         if (timezone != null) 'timezone': timezone,
+        if (utcOffset != null) 'utc_offset': utcOffset,
       })) as Map<String, dynamic>;
 
   Future<void> deleteBusiness(String id) => rpc('delete_business', {'id': id});
@@ -189,7 +213,8 @@ class BcApi {
     return up['media_id'] as String;
   }
 
-  /// [{id, business_id, content_type, created_at, url}]; `url` works for 1 hour.
+  /// [{id, business_id, content_type, created_at, url, download_url}]; both links work for 1 hour.
+  /// `url` shows the picture, `download_url` makes a browser save it as a file.
   Future<List<Map<String, dynamic>>> photos(String businessId) =>
       list('photos', {'business_id': 'eq.$businessId', 'order': 'created_at.desc'});
 
@@ -197,7 +222,9 @@ class BcApi {
 
   // ---------------------------------------------------------------- style profile
 
-  /// {business_id, status: none|analyzing|ready|failed, data, edited, updated_at, error}
+  /// {business_id, status: none|analyzing|ready|failed, data, edited, updated_at, error, learned, learned_at}
+  /// `data` always has: business_name, customers, tone (strings), best_days (lower-case English day names),
+  /// brand_colors ('#rrggbb'). `learned` is what the backend has learned from the user's choices, or null.
   Future<Map<String, dynamic>> profile(String businessId) async =>
       (await list('profiles', {'business_id': 'eq.$businessId'})).first;
 
@@ -208,15 +235,32 @@ class BcApi {
 
   // ---------------------------------------------------------------- posts
 
-  /// Queues [n] posts (1..10). Returns them with status `queued` and one shared `batch_id`.
+  /// Queues [n] OPTIONS for one post (1..10). Returns them with status `queued` and one shared `batch_id`.
+  /// Show them side by side when they finish and call [choosePost] with the one the user keeps.
   Future<List<Map<String, dynamic>>> generatePosts(String businessId, {int n = 3}) async =>
       ((await rpc('generate_posts', {'business_id': businessId, 'n': n})) as List).cast<Map<String, dynamic>>();
 
   Future<List<Map<String, dynamic>>> batch(String batchId) =>
       list('posts', {'batch_id': 'eq.$batchId', 'order': 'created_at.asc'});
 
-  Future<List<Map<String, dynamic>>> posts(String businessId, {int limit = 50, int offset = 0}) => list('posts',
-      {'business_id': 'eq.$businessId', 'order': 'created_at.desc', 'limit': limit, 'offset': offset});
+  /// The history, newest first: every post except the options the user passed on.
+  /// A post with `chosen_at == null` here belongs to a round the user has not decided yet.
+  Future<List<Map<String, dynamic>>> posts(String businessId, {int limit = 50, int offset = 0}) => list('posts', {
+        'business_id': 'eq.$businessId',
+        'passed_at': 'is.null',
+        'order': 'created_at.desc',
+        'limit': limit,
+        'offset': offset,
+      });
+
+  /// One post by id, or null when it does not exist (or is not this account's).
+  Future<Map<String, dynamic>?> post(String postId) async => (await list('posts', {'id': 'eq.$postId'})).firstOrNull;
+
+  /// The user keeps this option (it must be `ready` or `partial`). The other options of its batch are passed
+  /// and the account gets them back: a round costs one post and the chosen option's pictures.
+  /// Errors: 409 `not_ready`, 409 `already_chosen` (another option of this batch was chosen before).
+  Future<Map<String, dynamic>> choosePost(String postId) async =>
+      (await rpc('choose_post', {'post_id': postId})) as Map<String, dynamic>;
 
   static bool isFinished(Map<String, dynamic> post) =>
       const {'ready', 'partial', 'failed'}.contains(post['status']);

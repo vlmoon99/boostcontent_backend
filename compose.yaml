@@ -48,6 +48,7 @@ services:
     environment:
       PGPASSWORD: ${DB_PASSWORD}
       REPL_PASSWORD: ${REPL_PASSWORD:-}   # role `replicator`: followers stream with it, nodes ask each other's role with it
+      NODES: ${NODES:-}                   # → s3_node_endpoints: delete_account removes pictures on every node
       S: >-
         inference_url=${INFERENCE_URL}
         inference_key=${INFERENCE_KEY}

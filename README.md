@@ -10,7 +10,7 @@ cp .env.example .env            # fill it (see below)
 docker compose --profile master up -d --build   # db → migrate → configure → auth, rest, rest-admin, garage, caddy, cloudflared
                                 # (on a clustered node deploy/node.sh does this: see "More than one machine")
 scripts/garage-init.sh          # first time only: layout, bucket, access key
-scripts/test.sh                 # pgTAP: 38 assertions, all inside rolled-back transactions
+scripts/test.sh                 # pgTAP: 78 assertions, all inside rolled-back transactions (run it on the master)
 ./smoke.sh                      # the customer journey over HTTP (real LLM + images, ~2–4 min)
 ```
 
@@ -35,21 +35,24 @@ and `content-type: application/json`. Functions that return nothing answer `204`
 |---|---|---|
 | guest sign-in | `POST /auth/v1/signup` `{}` | `access_token` (1 h), `refresh_token`, `expires_at`, `user` |
 | refresh | `POST /auth/v1/token?grant_type=refresh_token` `{"refresh_token": …}` | the same shape, with a **new** refresh token |
-| me + quota | `rpc/me` | `{account_id, is_anonymous, month, limits: {posts_month, images_month, images_per_post}, used: {posts, images}}` |
+| me + quota | `rpc/me` | `{account_id, is_anonymous, plan, onboarded_at, month, limits: {posts_month, images_month, images_per_post}, used: {posts, images}, left: {posts, images}}` |
+| | `rpc/complete_onboarding` | the new `me` (`onboarded_at` is set once) |
+| | `rpc/delete_account` | `204`; rows, pictures and the sign-in are gone |
 | businesses | `GET /rest/v1/businesses` | `[{id, name, description, language, timezone, created_at, updated_at, profile_status}]` |
-| | `rpc/create_business {name, description?, language?: en/uk/ru, timezone?}` | the business (defaults: `uk`, `Europe/Kyiv`) |
-| | `rpc/update_business {id, name?, description?, language?, timezone?}` | the business |
+| | `rpc/create_business {name?, description?, language?: en/uk/ru, timezone? \| utc_offset?}` | the business (defaults: `uk`, `Europe/Kyiv`); without a name the profile analysis names it |
+| | `rpc/update_business {id, name?, description?, language?, timezone? \| utc_offset?}` | the business |
 | | `rpc/delete_business {id}` | `204` |
 | photo upload | 1. `rpc/upload_url {business_id, content_type?}` | `{media_id, put_url, method: "PUT", expires_in: 900}` |
 | | 2. `PUT put_url` with the raw bytes as the body | `200` |
 | | 3. `rpc/photo_uploaded {media_id}` | `204`; the photo is listed only after this |
-| photos | `GET /rest/v1/photos?business_id=eq.<id>` | `[{id, business_id, content_type, created_at, url}]` |
+| photos | `GET /rest/v1/photos?business_id=eq.<id>` | `[{id, business_id, content_type, created_at, url, download_url}]` |
 | | `rpc/delete_photo {media_id}` | `204` |
-| style profile | `GET /rest/v1/profiles?business_id=eq.<id>` | `[{business_id, status, data, edited, updated_at, error}]` |
+| style profile | `GET /rest/v1/profiles?business_id=eq.<id>` | `[{business_id, status, data, edited, updated_at, error, learned, learned_at}]` |
 | | `rpc/analyze_business {business_id}` | `204`; poll the profile until `ready` / `failed` |
 | | `rpc/update_profile {business_id, data}` | the profile (`data` is a JSON object, `edited` becomes true) |
-| posts | `rpc/generate_posts {business_id, n?}` (1–10, default 3) | the `n` new posts, `status: queued`, one shared `batch_id` |
-| | `GET /rest/v1/posts?batch_id=eq.<id>` (or `business_id=eq.<id>&order=created_at.desc`) | `[{id, business_id, batch_id, status, language, caption, hashtags, error, created_at, ready_at, images}]` |
+| posts | `rpc/generate_posts {business_id, n?}` (1–10, default 3) | `n` options for one post, `status: queued`, one shared `batch_id` |
+| | `GET /rest/v1/posts?batch_id=eq.<id>` (or `business_id=eq.<id>&order=created_at.desc`) | `[{id, business_id, batch_id, status, language, caption, hashtags, error, created_at, ready_at, images, chosen_at, passed_at}]` |
+| | `rpc/choose_post {post_id}` | the post, `chosen_at` set; the rest of its batch gets `passed_at` and is given back |
 | what the user did | `rpc/post_signal {post_id, kind: copied/downloaded/regenerated}` | `204` |
 | | `rpc/edit_post {post_id, caption, hashtags?}` | the post |
 | | `rpc/delete_post {post_id}` | `204` |
@@ -65,13 +68,25 @@ Things the app has to know:
   fresh one.
 * **Post status**: `queued` → `writing` → `rendering` → `ready`, `partial` (text is there, some pictures failed)
   or `failed` (`error` says why). Poll the batch every ~3 s until every post is in one of the last three; about
-  a minute for a post with 3 pictures. `images` is `[{position, status, url}]`, with `url` null until that picture is `ready`.
+  a minute for a post with 3 pictures. `images` is `[{position, status, url, download_url}]`, both null until that
+  picture is `ready` (`download_url` answers with `content-disposition: attachment`).
 * **Profile status**: `none` → `analyzing` → `ready` / `failed`. `generate_posts` starts the analysis by itself
   when there is no profile yet, so calling `analyze_business` first is optional.
 * **Quota** is taken when `generate_posts` is called (n posts + n × `images_per_post` pictures) and what didn't
-  get made is given back. The plan today: 1000 posts and 3000 pictures a month, 3 pictures per post.
+  get made is given back. When the user chooses one option (`choose_post`) the other options of that batch are
+  given back too: a round costs one post and the chosen option's pictures. There is one plan, `free`
+  (1000 posts, 3000 pictures a month, 3 pictures per post); the owner edits its limits in the console and `me`
+  always shows the current ones. Over the limit `generate_posts` answers 402 and nothing else changes.
   Pictures are 1024×1280 PNG.
+* **The profile's `data`** always has `business_name`, `customers`, `tone` (strings), `best_days` (lower-case
+  English day names) and `brand_colors` (`#rrggbb`); the other keys are the model's. `learned` is the memory of
+  the owner's taste (`{likes, dislikes, topics, voice, notes}`), null until the first choice or edit.
 * A row that isn't yours is simply not there: lists come back empty, they don't error.
+* **`delete_account`** removes the rows at once and sends a pre-signed `DELETE` for every picture to every
+  node's storage (`s3_node_endpoints`, written from `NODES` by `scripts/configure.sh`). Its access token stops
+  working immediately (`private.deleted_accounts`). Not covered: a picture still rendering at that moment is
+  written afterwards with no row pointing at it, and the nightly dumps / off-site copy keep the data until they
+  rotate (14 days for dumps).
 
 ### Errors
 
@@ -80,12 +95,13 @@ PostgREST's JSON: `{"code", "message", "details", "hint"}`. The HTTP status says
 
 | HTTP | `details` | When |
 |---|---|---|
-| 400 | `bad_content_type`, `bad_n`, `bad_signal`, `bad_profile` | wrong argument |
+| 400 | `bad_content_type`, `bad_n`, `bad_signal`, `bad_profile`, `bad_timezone` | wrong argument |
 | 401 | `not_authenticated`, or null with `code` `42501` / `PGRST3xx` | no token, or it expired / is malformed: refresh, then repeat the call |
 | 402 | `quota_exceeded` | the month's posts or pictures are used up (`hint` has the numbers) |
 | 403 | `blocked` | the owner blocked the account |
 | 404 | `not_found` | the business / photo / post isn't yours or doesn't exist |
 | 409 | `limit_businesses`, `limit_photos` | 50 businesses / 30 photos |
+| 409 | `not_ready`, `already_chosen` | `choose_post` on an unfinished option / on a batch that already has a choice |
 | 429 | `daily_cap` | the whole service hit its daily picture cap: try later |
 | 5xx | | the backend itself is broken: show "try again later" |
 
@@ -176,6 +192,10 @@ real app yet.
 3. **localize**: caption + hashtags into uk/ru (skipped for en).
 4. **image**: Qwen-Edit restyles the chosen product photo; the inference box GETs the photo and PUTs the
    PNG with pre-signed URLs. Postgres never handles image bytes.
+5. **learn**: after the owner chooses an option or rewrites a caption, the LLM reads the new rows of
+   `private.signals` (chosen, passed, edited, copied, downloaded, regenerated, deleted) together with the
+   current memory and writes the new one into `profiles.learned`. The next **ideas** request carries that
+   memory, the last picks and the angles the owner passed on.
 
 Failures retry with backoff (3 attempts); what didn't happen is refunded. Every model call is a row in
 `private.gen_trace`; user actions are rows in `private.signals`, and `admin_api.training_export()` joins them
