@@ -1,0 +1,5 @@
+name: bc_client
+environment:
+  sdk: ^3.3.0
+dependencies:
+  dio: ^5.7.0

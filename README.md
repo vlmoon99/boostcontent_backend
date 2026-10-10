@@ -89,6 +89,9 @@ PostgREST's JSON: `{"code", "message", "details", "hint"}`. The HTTP status says
 | 429 | `daily_cap` | the whole service hit its daily picture cap: try later |
 | 5xx | | the backend itself is broken: show "try again later" |
 
+**Building the app? Start with [docs/FLUTTER.md](docs/FLUTTER.md)**: step-by-step, with a tested Dart client
+(`client/dart`).
+
 ### From Dart (dio)
 
 Plain HTTP: no SDK is needed. This is your own PostgREST API; the only borrowed piece is the auth server
