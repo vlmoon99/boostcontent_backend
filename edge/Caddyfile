@@ -6,6 +6,22 @@
 }
 
 :3100 {
+	# The inference gateway's public name rides the same tunnel and the same `localhost:3100`, whichever node
+	# is the master. Only the model API (/v1) is public: the gateway's key management is not. Upstreams are
+	# tried in order, so a second gateway is one more address in INFERENCE_UPSTREAMS.
+	@inference host {$INFERENCE_PUBLIC_HOST:inference.invalid}
+	handle @inference {
+		handle /v1/* {
+			reverse_proxy {$INFERENCE_UPSTREAMS} {
+				lb_policy first
+				lb_try_duration 5s
+				fail_duration 30s
+			}
+		}
+		handle {
+			respond "not found" 404
+		}
+	}
 	handle /auth/v1/* {
 		uri strip_prefix /auth/v1
 		reverse_proxy auth:9999

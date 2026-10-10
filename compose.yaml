@@ -145,6 +145,9 @@ services:
     image: bc/caddy:local
     container_name: bc-caddy
     restart: unless-stopped
+    environment:
+      INFERENCE_PUBLIC_HOST: ${INFERENCE_PUBLIC_HOST:-inference.invalid}
+      INFERENCE_UPSTREAMS: ${INFERENCE_UPSTREAMS:-${INFERENCE_URL}}
     ports:
       - "127.0.0.1:3100:3100"             # cloudflared → here
       - "${TAILNET_IP}:3200:3200"         # owner console, tailnet only
