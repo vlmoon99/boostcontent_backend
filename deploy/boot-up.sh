@@ -7,3 +7,13 @@ ip=$(grep -E '^TAILNET_IP=' .env | cut -d= -f2)
 for i in $(seq 120); do ip -4 addr | grep -q " ${ip}/" && break; sleep 5; done
 for i in $(seq 60); do docker info >/dev/null 2>&1 && break; sleep 5; done
 docker compose up -d --no-build 2>&1 | tail -20
+# A container Docker itself failed to start at boot (tailnet IP missing) comes up afterwards WITHOUT its
+# published ports, and neither restart nor stop/start brings them back (Docker 29.2.1, seen 2026-10-10):
+# recreate it. Data lives in named volumes, so this is safe.
+for s in $(docker compose ps --services); do
+  c=$(docker compose ps -q "$s"); [ -n "$c" ] || continue
+  want=$(docker inspect "$c" --format '{{len .HostConfig.PortBindings}}')
+  [ "$want" -gt 0 ] && [ -z "$(docker port "$c")" ] || continue
+  echo "boot-up: $s has no published ports, recreating"
+  docker compose up -d --no-build --no-deps --force-recreate "$s" 2>&1 | tail -3
+done
