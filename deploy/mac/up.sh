@@ -11,7 +11,11 @@
 # The first run writes .env with random secrets; later runs only change PUBLIC_URL / S3_PUBLIC_ENDPOINT.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-dc() { docker compose -f compose.yaml -f deploy/mac/compose.mac.yaml --profile master "$@"; }
+dc() {
+  local extra=()
+  grep -qE '^MAC_TAILNET_IP=.+' .env 2>/dev/null && extra=(-f deploy/mac/compose.mac.tailnet.yaml)
+  docker compose -f compose.yaml -f deploy/mac/compose.mac.yaml "${extra[@]}" --profile master "$@"
+}
 SERVICES="db migrate configure auth rest rest-admin garage caddy backup"
 
 if [ "${1:-}" = down ]; then dc stop; exit 0; fi
@@ -47,6 +51,7 @@ EOF
 fi
 sed -i '' -e "s#^PUBLIC_URL=.*#PUBLIC_URL=$PUBLIC#" -e "s#^S3_PUBLIC_ENDPOINT=.*#S3_PUBLIC_ENDPOINT=$PUBLIC#" .env
 
+set -a; . ./.env; set +a          # MAC_* tuning below; deploy/mac/inference.sh writes it
 dc up -d --build $SERVICES
 scripts/garage-init.sh >/dev/null && echo "storage ready"
 
@@ -59,4 +64,3 @@ on conflict (key) do update set value = excluded.value, updated_at = now();
 update private.plans set images_per_post = ${MAC_IMAGES_PER_POST:-1};
 SQL
 echo "backend: $PUBLIC   (owner console: http://127.0.0.1:3200)"
-echo "inference key for inference_system/hosts/mac: $(grep ^INFERENCE_KEY= .env | cut -d= -f2)"

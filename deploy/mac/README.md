@@ -37,6 +37,25 @@ The Mac's database is its own: accounts and posts made here do not exist on the 
 The inference API on the Mac has one key (this `.env`'s `INFERENCE_KEY`), not the Sparks' project keys.
 Left over from the first try: a record `boostcontent.io.vramhouse.com` (harmless; delete it in the dashboard).
 
+## Model calls: the Sparks or this Mac (2026-10-10)
+
+```
+deploy/mac/inference.sh sparks   # the backend stays on the Mac, the models run on the Sparks (tailnet)
+deploy/mac/inference.sh mac      # everything on the Mac (inference_system/hosts/mac must be running)
+deploy/mac/inference.sh status
+```
+
+With `sparks` Postgres calls the first gateway of `SPARK_GATEWAYS` with `SPARK_INFERENCE_KEY` (the Sparks' project
+key `boostcontent`); that gateway spreads the work over both Sparks. The Mac's storage also listens on its tailnet
+address (`compose.mac.tailnet.yaml`), because the Sparks fetch the product photo and put the picture themselves.
+`api.vramhouse.com` then reaches the Sparks' gateways again, with their own project keys. The tuning goes back to
+the Sparks' values: 4 + 4 jobs in flight, up to 3 pictures per option.
+
+Measured through boostcontent.io with the backend on the Mac: a round of three options about one item, 251 s with
+the Mac's models, 73 s with the Sparks'. `smoke.sh` 16/16 (one post with 3 pictures in 116 s).
+If the first gateway is down, generation fails until `SPARK_GATEWAYS` is reordered and the command is run again:
+Postgres calls one address, there is no failover on this side.
+
 What is different from a Spark node:
 
 * `compose.mac.yaml` replaces the port lists (there is no tailnet IP) and Caddy listens on every interface.

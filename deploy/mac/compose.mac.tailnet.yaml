@@ -1,0 +1,8 @@
+# Added by deploy/mac/up.sh when MAC_TAILNET_IP is set in .env: the Mac's storage also listens on its
+# tailnet address, so inference machines elsewhere on the tailnet (the Sparks) can fetch the product
+# photo and put the finished picture with the pre-signed links.
+services:
+  garage:
+    ports: !override
+      - "127.0.0.1:3900:3900"
+      - "${MAC_TAILNET_IP}:3900:3900"
