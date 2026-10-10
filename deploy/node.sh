@@ -10,8 +10,8 @@
 #   1. A node's role is what its Postgres says: read-write = master, standby = follower.
 #   2. Master: run the API, the entry and the Cloudflare tunnel. Follower: stream the master's database,
 #      copy its pictures every minute, run nothing public.
-#   3. A follower that sees no master takes over when every node above it in NODES has been unreachable on
-#      every path (database port, tailnet ping, LAN ping) for NODE_FAIL_SECS. A host that still answers pings
+#   3. A follower that sees no master takes over when the master it followed and every node above it in NODES
+#      have been unreachable on every path (database port, tailnet ping, LAN ping) for NODE_FAIL_SECS. A host that still answers pings
 #      is alive, so nobody takes over from it: a crashed container is Docker's job to restart.
 #   4. Two masters (a node came back, or the nodes lost sight of each other): the one promoted LAST wins
 #      (Postgres timeline; a tie goes to the higher priority). The loser dumps its database to
@@ -72,7 +72,8 @@ ensure_master() {
 clone_from() {   # throw the local copy away and become a follower of node $1
   local mip=${N[$1]%%/*} ts; ts=$(date -u +%Y%m%dT%H%M%S)
   log "re-cloning from node$1 ($mip)"
-  if [ -n "$(local_role)" ] && running bc-backup; then
+  if [ -n "$(local_role)" ]; then
+    running bc-backup || { dc up -d --no-build --no-deps backup >/dev/null 2>&1; sleep 2; }
     docker exec bc-backup sh -c "pg_dump -h db -U postgres -Fc boostcontent > /backups/before-reclone-$ts.dump" \
       && log "local database saved first: .data/backups/before-reclone-$ts.dump" || log "could not dump the local database first"
   fi
@@ -108,7 +109,7 @@ promote() {
 }
 
 tick() {
-  local mine i r tl best_i=-1 best_tl=-1 mytl
+  local mine i r tl best_i=-1 best_tl=-1 mytl was
   mine=$(local_role)
   for i in "${!N[@]}"; do
     [ "$i" = "$ME" ] && continue
@@ -126,9 +127,12 @@ tick() {
       fi ;;
     t\ *)
       if (( best_i >= 0 )); then DOWN_SINCE=0; WAITING=; ensure_follower "$best_i"; return; fi
-      for (( i = 0; i < ME; i++ )); do          # is anyone above me still there?
+      was=$(docker exec bc-db psql -X -U postgres -tAc "show primary_conninfo" 2>/dev/null | grep -oE 'host=[^ ]+' | cut -d= -f2)
+      for i in "${!N[@]}"; do                   # is the master's host, or anyone above me, still there?
+        [ "$i" = "$ME" ] && continue
+        (( i < ME )) || [ "${N[$i]%%/*}" = "$was" ] || continue
         if [ -n "${ROLE[$i]:-}" ] || pings "${N[$i]}"; then
-          [ "${WAITING:-}" = "$i" ] || { log "no master, but node$i is alive: it goes first"; WAITING=$i; }
+          [ "${WAITING:-}" = "$i" ] || { log "no master, but node$i is alive: not taking over"; WAITING=$i; }
           DOWN_SINCE=0; return
         fi
       done
