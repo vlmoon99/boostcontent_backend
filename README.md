@@ -7,7 +7,8 @@ Spark or a cloud VM.
 
 ```
 cp .env.example .env            # fill it (see below)
-docker compose up -d --build    # db → migrate → configure → auth, rest, rest-admin, garage, caddy, cloudflared
+docker compose --profile master up -d --build   # db → migrate → configure → auth, rest, rest-admin, garage, caddy, cloudflared
+                                # (on a clustered node deploy/node.sh does this: see "More than one machine")
 scripts/garage-init.sh          # first time only: layout, bucket, access key
 scripts/test.sh                 # pgTAP: 38 assertions, all inside rolled-back transactions
 ./smoke.sh                      # the customer journey over HTTP (real LLM + images, ~2–4 min)
@@ -191,39 +192,51 @@ posts, quotas (per-user override), plans, failed jobs. Backed by a second PostgR
 | `INFERENCE_URL`, `INFERENCE_KEY` | the inference gateway + BoostContent's project key |
 | `S3_PUBLIC_ENDPOINT` / `S3_INTERNAL_ENDPOINT` | what apps use (`https://boostcontent.io`) / what inference uses (`http://100.64.0.1:3900`) |
 | `S3_ACCESS_KEY` (`GK` + 24 hex), `S3_SECRET_KEY` (64 hex) | imported into Garage by `garage-init.sh` |
-| `REPL_PASSWORD` | optional; the standby's replication login (see replica/) |
+| `REPL_PASSWORD`, `NODES` | the cluster: followers stream with the first; the second is every node in priority order |
 | the rest | random secrets: DB/role passwords, `JWT_SECRET` (GoTrue ⇄ PostgREST), `ADMIN_JWT_SECRET`, Garage RPC/admin |
 
-## The second machine (replica/)
+## More than one machine: master, followers, takeover
 
-`replica/compose.yaml` runs on another box (today dgx-spark-2, `~/boostcontent_backend/replica`) and keeps a
-live copy of everything the primary holds:
+Every node runs this same compose file with the same `.env` (only `TAILNET_IP` differs). `deploy/node.sh`,
+a user systemd unit (`deploy/bc-node.service`), decides what each node is and is the only thing that starts
+the stack:
 
-| Service | What it keeps | How fresh |
+| Role | Runs | |
 |---|---|---|
-| `bc-replica-db` | a hot standby: Postgres streaming replication from the primary's `:5442` through slot `replica1` | about a second behind |
-| `bc-replica-dumps` | `pg_dump` of the standby in `replica/.data/dumps`, 14 days | daily |
-| `bc-replica-media` | the picture bucket in `replica/.data/media`, copied with a read-only key; never deletes | hourly |
+| master | everything: read-write Postgres, the API, the entry, the Cloudflare tunnel | exactly one |
+| follower | Postgres as a live standby of the master (about a second behind), its own Garage fed with the master's pictures every minute, the daily dump | all the others |
 
-`replica/status.sh` on that box says whether it is streaming (exit 0 = healthy). On the primary:
-`select * from pg_stat_replication`.
+`NODES` in `.env` lists the nodes in priority order. When the master's machine stops answering on every path
+(database port, tailnet ping, LAN ping) for `NODE_FAIL_SECS` (60), the next node in the list promotes its
+copy, starts the API and the tunnel, and boostcontent.io is served from there: about 40 s after the decision.
+A node that comes back finds a newer master, saves its own database to `.data/backups/before-reclone-*.dump`,
+throws its copy away and re-clones as a follower. It does not take the master role back.
 
-What each part is for: the standby survives a dead primary disk with at most a second of loss; the dumps
-survive a mistake (a bad migration or a deleted row is replicated faithfully, a dump from yesterday isn't);
-the media copy survives a lost bucket, minus the last hour.
+```
+deploy/node.sh status     # every node's role, replication state, this node's containers
+deploy/node.sh promote    # make this node the master now (planned move; the old master yields by itself)
+journalctl --user -u bc-node -f
+```
 
-What it is not, yet:
-* **Failover is manual and has not been rehearsed.** The outline: `docker exec -u postgres bc-replica-db
-  pg_ctl promote`, then run the main compose on that box against the promoted data (with the image's normal
-  command, so pg_cron + pg_net load), load `.data/media` into its Garage, and start cloudflared there (the
-  tunnel follows whichever box runs it).
-* **Reads are not spread.** The standby accepts read-only queries (a second PostgREST could serve `GET`s from
-  it), but the app talks to the primary only. At today's load one Postgres is far from its limit.
-* If the replica is off long enough for the primary to hold 8 GB of changes for it
-  (`max_slot_wal_keep_size`), the primary drops the slot's backlog and the standby has to be cloned again
-  (empty its `db_data` volume, `up`).
+Adding a node: clone the repo, copy `.env` (change `TAILNET_IP`, drop `S3_INTERNAL_ENDPOINT`), add the node to
+`NODES` on every node, `docker compose --profile master --profile follower build`, `docker compose up -d garage`,
+`scripts/garage-init.sh`, install + start the unit. It clones itself from the master.
 
-In the cloud the same file runs on a second VM or region: point `PRIMARY_HOST` and `S3_ENDPOINT` at the primary.
+Proven on the two Sparks (2026-10-10): takeover in both directions with the full smoke test passing on the new
+master through Cloudflare, the returning node yielding and re-cloning, pictures present on both. Limits:
+
+* **Deliberately no voting.** All nodes sit in one room on one switch. If two live nodes ever lose sight of
+  each other completely, both are masters until they meet again, and the one promoted first loses what it wrote
+  meanwhile (it is dumped first, not merged). Nodes in different sites need a quorum instead (Patroni).
+* **A master whose machine is alive is never replaced**, even if its database is down: Docker restarts
+  containers, and `node.sh promote` on a follower is the manual override.
+* **Up to a minute of pictures** can be missing after a takeover (the sync interval); changes in the database
+  from the last second or so.
+* **Generation needs the inference gateway** (`INFERENCE_URL`, on dgx-spark). With that machine off, the site,
+  sign-in and existing posts work from the new master, and new posts wait in the queue.
+* The admin console is on the master: `http://<master's tailnet IP>:3200`.
+* Takeover was tested by stopping the stack and telling the follower to treat that as a dead host
+  (`NODE_NO_PING=1`); a real power-off of the master has not been done yet.
 
 ## Moving to the cloud
 
