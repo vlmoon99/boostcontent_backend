@@ -1,68 +1,82 @@
-# Runbook: what runs where, and what to do (2026-10-10)
+# Runbook: what runs where, and what to do (updated 2026-10-10 21:35 UTC)
 
-The short version: **the Mac is the server, the Sparks are the muscles.** The website name, the database,
-your items, posts and pictures are on the Mac. Writing captions and drawing pictures happens on the two Sparks.
+**The Sparks are the server again.** `boostcontent.io` and `api.vramhouse.com` are answered by the two Sparks:
+database, pictures, captions and picture rendering. The Mac runs nothing: its backend, tunnel and models are
+stopped. It is a spare for the day the Sparks lose power.
+
+What was moved at 21:25 UTC: the Mac's database (everything made since the power cut: accounts, items, posts)
+and its 82 pictures were copied to dgx-spark-2 (the master) and replicated to dgx-spark. The phone keeps its
+account: its sign-in was moved with the data.
 
 ## Every day
 
 | I want to… | Where | Do this |
 |---|---|---|
 | Use the app | iPhone | Just open it. It talks to `https://boostcontent.io` |
-| Check everything is up | Mac, in `boostcontent_backend` | `docker ps` shows 7 `bc-` containers; `deploy/mac/inference.sh status`; `curl https://boostcontent.io` answers `BoostContent` |
-| Run the full self-test | Mac, in `boostcontent_backend` | `BASE=https://boostcontent.io ./smoke.sh` → `16 passed` (about 2 minutes) |
+| Check the Sparks | any machine on the tailnet | `ssh 100.64.0.12 'cd ~/boostcontent_backend && deploy/node.sh status'` → node1 MASTER, node0 follower, "streaming" |
+| Run the full self-test | on dgx-spark-2 | `cd ~/boostcontent_backend && ./smoke.sh` → `16 passed` (about a minute) |
 
-## After the Mac restarts (nothing starts by itself)
+## The Sparks lost power → the Mac takes over (slower, and with OLD data)
 
-1. Open **Docker Desktop** and wait until it says it is running.
-2. In `boostcontent_backend`: `deploy/mac/tunnel.sh named https://boostcontent.io`
-   (starts the containers and the Cloudflare tunnel for both names).
-3. Only if the Sparks are off: see the next section.
+The Mac's database is a copy from 2026-10-10 21:25 UTC. Anything made on the Sparks after that is not in it.
+Use this only to keep the app working; when the Sparks return, what was made on the Mac in between has to be
+moved back the same way (see "Moving the data" below), or it is lost.
 
-The Mac must stay awake, on power and online. If it sleeps, the site is down.
+1. Open **Docker Desktop**, wait until it runs.
+2. In `inference_system/hosts/mac`: `./run.sh start` (the Mac's own models, about a minute)
+3. In `boostcontent_backend`: `deploy/mac/inference.sh mac`
+4. Point the names at the Mac and start its tunnel:
+   ```
+   cloudflared tunnel route dns --overwrite-dns bc-mac boostcontent.io
+   cloudflared --origincert ~/.cloudflared/cert-vramhouse.pem tunnel route dns --overwrite-dns bc-mac api.vramhouse.com
+   deploy/mac/tunnel.sh named https://boostcontent.io
+   ```
 
-## The Sparks are off (power cut) → run the models on the Mac
+## The Sparks are back → give them the names again
 
-Slower (about 4 minutes per round, one picture per option) but it works.
+```
+cloudflared tunnel route dns --overwrite-dns test_ads_client boostcontent.io
+cloudflared --origincert ~/.cloudflared/cert-vramhouse.pem tunnel route dns --overwrite-dns test_ads_client api.vramhouse.com
+deploy/mac/tunnel.sh stop && deploy/mac/up.sh down
+( cd ../inference_system/hosts/mac && ./run.sh stop )
+```
 
-1. In `inference_system/hosts/mac`: `./run.sh start` (loads the Mac's models, about a minute)
-2. In `boostcontent_backend`: `deploy/mac/inference.sh mac`
+Never let both tunnels serve at once: two machines with two databases must not answer for one name.
 
-## The Sparks are back → use them again
+## Moving the data (what was done on 2026-10-10, for the next time)
 
-About 70 seconds per round, up to three pictures per option.
+1. Stop the entry on the source so nothing new is written (`docker stop bc-caddy bc-rest bc-auth`).
+2. `pg_dump -Fc boostcontent` on the source; copy the file to the target master.
+3. On the target: stop the watchdog on every node (`systemctl --user stop bc-node`), dump the current database
+   as a backup, stop `bc-rest bc-rest-admin bc-auth`, `drop database boostcontent with (force)`, create it,
+   `pg_restore`, then `docker compose --profile master run --rm --no-deps configure` (writes the target's own
+   addresses and keys into the settings), start the three services and the watchdogs.
+4. Copy the pictures with rclone between the two storages (bucket `bc-media`, each side's own S3 keys).
+5. Switch the names, run `./smoke.sh` on the target.
 
-1. In `boostcontent_backend`: `deploy/mac/inference.sh sparks`
-   (it refuses and changes nothing if the Sparks' gateway does not answer)
-2. In `inference_system/hosts/mac`: `./run.sh stop` (frees the Mac's memory)
-
-If dgx-spark-2 (`100.64.0.12`) is down but dgx-spark (`100.64.0.1`) is up: in `.env` put `100.64.0.1` first in
-`SPARK_GATEWAYS`, then run `deploy/mac/inference.sh sparks` again.
+Backups left on dgx-spark-2 in `~/boostcontent_backend/.data/backups/`: `sparks-before-mac-data.dump` (the
+Sparks' database as it was before the Mac's data replaced it) and `before-0012-0014.dump`.
 
 ## New build for the iPhone
 
-On the Mac, in `boostcontent_client`, with the phone connected by cable and unlocked:
+On the Mac, in `boostcontent_client`, phone connected by cable and unlocked:
 `fvm flutter build ios --profile && fvm flutter install --profile -d 00008110-0019744C0AD9401E`
-
-## On the Sparks
-
-Paste the text from `inference_system/docs/SPARK_HANDOFF.md` (section "Do this on the Sparks") to whoever
-works there, or follow it yourself. In short: pull both repos, fix the database of dgx-spark that does not
-answer, apply the three new migrations, and do not touch the public names.
 
 ## In Cloudflare (dashboard), once
 
 * `vramhouse.com` → DNS: delete the record `boostcontent.io.vramhouse.com` (a leftover, harmless).
-* Nothing else. `boostcontent.io` and `api.vramhouse.com` point at the tunnel `bc-mac`; that is intended.
 
 ## Not decided yet (yours to decide)
 
-* **Moving everything back to the Sparks.** Then the Mac can be switched off, but today's accounts, items and
-  posts live only in the Mac's database and would have to be copied over first. Until then: Mac = server.
+* **The watchdog bug** found on 2026-10-10 (`inference_system/docs/PROGRESS.md`): after a power cut a Spark can
+  come up with network-less database containers and not heal itself.
 * **A real sign-in.** Still guest only: deleting the app or changing the phone loses the account.
 * **The landing page text** still says "Posts appear by themselves" and "every week".
+* **The Mac's model files** (7 GB in `~/.cache/inf-mac/models`) are kept for the spare role; delete them if the
+  Mac should never serve again.
 
 ## Where the secrets are
 
-`boostcontent_backend/.env` on the Mac (not in git): database passwords, the Mac's own inference key
-(`MAC_INFERENCE_KEY`) and the Sparks' project key (`SPARK_INFERENCE_KEY`). `~/.cloudflared/` holds the tunnel
-credentials and the two Cloudflare logins. Back these up somewhere that is not this Mac.
+Sparks: `~/boostcontent_backend/.env` and `inference_system/hosts/<host>/.env` on each node.
+Mac: `boostcontent_backend/.env` (its own database passwords and keys) and `~/.cloudflared/` (the tunnel
+`bc-mac` and the two Cloudflare logins that can repoint the names). Back them up somewhere else.
