@@ -4,7 +4,7 @@
 # (Flutter: --dart-define=API_URL=<address>), and picture links signed for the old one stop working.
 # For a fixed name use a named tunnel of your own Cloudflare account instead; never the boostcontent.io
 # tunnel token, which belongs to the Sparks.
-#   deploy/mac/tunnel.sh start | stop | url
+#   deploy/mac/tunnel.sh start | stop | url | named https://<name>
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 LOGS=${LOGS:-$HOME/.cache/inf-mac/logs}; mkdir -p "$LOGS"
@@ -19,6 +19,18 @@ case "${1:-url}" in
     [ -n "$(url)" ] || { echo "no tunnel address: $LOGS/tunnel.log"; exit 1; }
     deploy/mac/up.sh "$(url)" | tail -2
     echo "public: $(url)" ;;
+  named)
+    # Your own names through a tunnel of your Cloudflare account (once: `cloudflared tunnel login` per site,
+    # `cloudflared tunnel create bc-mac`, `cloudflared tunnel route dns --overwrite-dns bc-mac <name>`).
+    # Every name on the tunnel reaches Caddy :3100, which splits by host and path as on the Sparks.
+    #   deploy/mac/tunnel.sh named https://boostcontent.io [tunnel-name]
+    [ -n "${2:-}" ] || { echo "usage: $0 named https://<name> [tunnel]"; exit 1; }
+    [ -f "$LOGS/tunnel.pid" ] && kill "$(cat "$LOGS/tunnel.pid")" 2>/dev/null
+    : > "$LOGS/tunnel.log"
+    nohup cloudflared tunnel --no-autoupdate run --url http://localhost:3100 "${3:-bc-mac}" >> "$LOGS/tunnel.log" 2>&1 &
+    echo $! > "$LOGS/tunnel.pid"
+    deploy/mac/up.sh "$2" | tail -2
+    echo "public: $2" ;;
   stop) [ -f "$LOGS/tunnel.pid" ] && kill "$(cat "$LOGS/tunnel.pid")" 2>/dev/null; rm -f "$LOGS/tunnel.pid"; echo stopped ;;
   url) url ;;
 esac
