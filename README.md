@@ -9,29 +9,108 @@ Spark or a cloud VM.
 cp .env.example .env            # fill it (see below)
 docker compose up -d --build    # db → migrate → configure → auth, rest, rest-admin, garage, caddy, cloudflared
 scripts/garage-init.sh          # first time only: layout, bucket, access key
-scripts/test.sh                 # pgTAP: 36 assertions, all inside rolled-back transactions
+scripts/test.sh                 # pgTAP: 38 assertions, all inside rolled-back transactions
 ./smoke.sh                      # the customer journey over HTTP (real LLM + images, ~2–4 min)
 ```
 
 ## For the app (Flutter)
 
-Base URL `https://boostcontent.io`. Supabase client libraries work as-is (`supabase_flutter` with
-`url = https://boostcontent.io`, `anonKey` = any JWT-shaped string; we don't use the anon key).
+Base URL `https://boostcontent.io`. Three path prefixes, nothing else:
 
-| Step | Call |
-|---|---|
-| guest sign-in | `POST /auth/v1/signup` `{}` → `access_token`, `refresh_token` (keep both on the device) |
-| refresh | `POST /auth/v1/token?grant_type=refresh_token` `{"refresh_token": …}` |
-| me + quota | `POST /rest/v1/rpc/me` |
-| businesses | `GET /rest/v1/businesses` · `POST /rest/v1/rpc/create_business {name, description, language: en/uk/ru, timezone}` · `rpc/update_business` · `rpc/delete_business` |
-| photo upload | `rpc/upload_url {business_id, content_type}` → `PUT put_url` with the bytes → `rpc/photo_uploaded {media_id}` |
-| photos | `GET /rest/v1/photos?business_id=eq.…` (each has a 1-hour `url`) |
-| style profile | `GET /rest/v1/profiles?business_id=eq.…` · `rpc/analyze_business` · `rpc/update_profile {business_id, data}` |
-| posts | `rpc/generate_posts {business_id, n}` → poll `GET /rest/v1/posts?batch_id=eq.…` until `ready` / `partial` / `failed` |
-| what the user did | `rpc/post_signal {post_id, kind: copied/downloaded/regenerated}` · `rpc/edit_post {post_id, caption, hashtags}` · `rpc/delete_post` |
+| Prefix | What | Auth |
+|---|---|---|
+| `/auth/v1` | GoTrue: guest sign-in, token refresh | none |
+| `/rest/v1` | PostgREST: the API below (schema `api`) | `Authorization: Bearer <access_token>` on every call |
+| `/bc-media` | pictures, only through the pre-signed URLs the API hands out | the URL itself (send no `Authorization`) |
 
-Errors: HTTP 4xx with PostgREST's JSON; `details` holds a stable code (`quota_exceeded`, `not_found`,
-`daily_cap`, `not_authenticated`, `blocked`, `bad_content_type`, `limit_photos`, …).
+There is no anon key and no realtime: the app polls. CORS is open (`*`), so Flutter web works too.
+
+### The calls
+
+Views are read with `GET`; everything under `rpc/` is `POST` with a JSON body (`{}` when it takes nothing)
+and `content-type: application/json`. Functions that return nothing answer `204` with an empty body.
+
+| Step | Call | Returns |
+|---|---|---|
+| guest sign-in | `POST /auth/v1/signup` `{}` | `access_token` (1 h), `refresh_token`, `expires_at`, `user` |
+| refresh | `POST /auth/v1/token?grant_type=refresh_token` `{"refresh_token": …}` | the same shape, with a **new** refresh token |
+| me + quota | `rpc/me` | `{account_id, is_anonymous, month, limits: {posts_month, images_month, images_per_post}, used: {posts, images}}` |
+| businesses | `GET /rest/v1/businesses` | `[{id, name, description, language, timezone, created_at, updated_at, profile_status}]` |
+| | `rpc/create_business {name, description?, language?: en/uk/ru, timezone?}` | the business (defaults: `uk`, `Europe/Kyiv`) |
+| | `rpc/update_business {id, name?, description?, language?, timezone?}` | the business |
+| | `rpc/delete_business {id}` | `204` |
+| photo upload | 1. `rpc/upload_url {business_id, content_type?}` | `{media_id, put_url, method: "PUT", expires_in: 900}` |
+| | 2. `PUT put_url` with the raw bytes as the body | `200` |
+| | 3. `rpc/photo_uploaded {media_id}` | `204`; the photo is listed only after this |
+| photos | `GET /rest/v1/photos?business_id=eq.<id>` | `[{id, business_id, content_type, created_at, url}]` |
+| | `rpc/delete_photo {media_id}` | `204` |
+| style profile | `GET /rest/v1/profiles?business_id=eq.<id>` | `[{business_id, status, data, edited, updated_at, error}]` |
+| | `rpc/analyze_business {business_id}` | `204`; poll the profile until `ready` / `failed` |
+| | `rpc/update_profile {business_id, data}` | the profile (`data` is a JSON object, `edited` becomes true) |
+| posts | `rpc/generate_posts {business_id, n?}` (1–10, default 3) | the `n` new posts, `status: queued`, one shared `batch_id` |
+| | `GET /rest/v1/posts?batch_id=eq.<id>` (or `business_id=eq.<id>&order=created_at.desc`) | `[{id, business_id, batch_id, status, language, caption, hashtags, error, created_at, ready_at, images}]` |
+| what the user did | `rpc/post_signal {post_id, kind: copied/downloaded/regenerated}` | `204` |
+| | `rpc/edit_post {post_id, caption, hashtags?}` | the post |
+| | `rpc/delete_post {post_id}` | `204` |
+
+Things the app has to know:
+
+* **The account is the device.** A guest has no email and no password: if the refresh token is lost, so is the
+  account. Store both tokens in secure storage and refresh before `expires_at`.
+* **Uploads**: jpeg, png, webp or heic; at most 30 photos per business and 50 businesses per account. The `PUT`
+  goes straight to storage with only the bytes (no `Authorization` header, or the signature check fails), within
+  15 minutes.
+* **Picture URLs live 1 hour** (`photos.url`, `posts.images[].url`). Don't store them: read the row again for a
+  fresh one.
+* **Post status**: `queued` → `writing` → `rendering` → `ready`, `partial` (text is there, some pictures failed)
+  or `failed` (`error` says why). Poll the batch every ~3 s until every post is in one of the last three; about
+  a minute for a post with 3 pictures. `images` is `[{position, status, url}]`, with `url` null until that picture is `ready`.
+* **Profile status**: `none` → `analyzing` → `ready` / `failed`. `generate_posts` starts the analysis by itself
+  when there is no profile yet, so calling `analyze_business` first is optional.
+* **Quota** is taken when `generate_posts` is called (n posts + n × `images_per_post` pictures) and what didn't
+  get made is given back. The plan today: 1000 posts and 3000 pictures a month, 3 pictures per post.
+  Pictures are 1024×1280 PNG.
+* A row that isn't yours is simply not there: lists come back empty, they don't error.
+
+### Errors
+
+PostgREST's JSON: `{"code", "message", "details", "hint"}`. **Branch on `details`**, not on the HTTP status:
+
+| `details` | HTTP | When |
+|---|---|---|
+| `quota_exceeded` | 400 | the month's posts or pictures are used up (`hint` has the numbers) |
+| `daily_cap` | 400 | the whole service hit its daily picture cap: try later |
+| `limit_businesses`, `limit_photos` | 400 | 50 businesses / 30 photos |
+| `bad_content_type`, `bad_n`, `bad_signal`, `bad_profile` | 400 | wrong argument |
+| `not_found` | **500** | the business / photo / post isn't yours or doesn't exist (PostgREST maps this SQL code to 500) |
+| `blocked` | 403 | the owner blocked the account |
+| *(null)*, `code` `42501` | 401 | no token |
+| *(null)*, `code` `PGRST3xx` | 401 | token expired or malformed: refresh, then repeat the call |
+
+### With `supabase_flutter`
+
+The paths are Supabase's, so the client library fits, with one setting it needs: the API lives in schema `api`,
+and the client asks for `public` unless told (that fails with `406 PGRST106`).
+
+```dart
+await Supabase.initialize(
+  url: 'https://boostcontent.io',
+  anonKey: 'unused',                       // nothing checks it
+  postgrestOptions: const PostgrestClientOptions(schema: 'api'),
+);
+final db = Supabase.instance.client;
+if (db.auth.currentSession == null) await db.auth.signInAnonymously();   // session is persisted + refreshed
+
+final biz = await db.rpc('create_business', params: {'name': 'Bakery', 'language': 'uk'});
+final up = await db.rpc('upload_url', params: {'business_id': biz['id'], 'content_type': 'image/jpeg'});
+await http.put(Uri.parse(up['put_url']), body: bytes);                    // package:http, no headers
+await db.rpc('photo_uploaded', params: {'media_id': up['media_id']});
+final posts = await db.rpc('generate_posts', params: {'business_id': biz['id'], 'n': 3});
+final batch = await db.from('posts').select().eq('batch_id', posts[0]['batch_id']);   // poll this
+```
+
+Not available: `db.storage`, realtime channels, email/OAuth sign-in. The HTTP calls above are what `./smoke.sh`
+runs on every release; this Dart snippet itself has not been run against a real app yet.
 
 ## How generation works
 
