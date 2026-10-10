@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap;
-select plan(14);
+select plan(19);
 
 create function pg_temp.as_user(u uuid) returns void language sql as $$
   select set_config('request.jwt.claims', json_build_object('sub', u, 'role', 'authenticated', 'is_anonymous', true)::text, true);
@@ -47,6 +47,17 @@ select pg_temp.as_user('00000000-0000-0000-0000-0000000000e1');
 select is((select count(*)::int from api.generate_posts((select biz from t), 1)), 1, 'a round without an item still works');
 select api.delete_item((select item from t));
 select is((select count(*)::int from api.items where id = (select item from t)), 0, 'a deleted item is gone');
+
+-- stopping a round
+create temp table d as select * from api.generate_posts((select biz from t), 3);
+create temp table used as select (api.me()->'used'->>'posts')::int as posts;
+select lives_ok($$ select api.discard_batch((select batch_id from d limit 1)) $$, 'a round is discarded');
+select is((select count(*)::int from api.posts where batch_id = (select batch_id from d limit 1) and passed_at is null), 0, 'none of its options is left to pick');
+select is((api.me()->'used'->>'posts')::int, (select posts - 3 from used), 'its three posts are given back');
+reset role;
+select is((select status from private.jobs where kind = 'ideas' and batch_id = (select batch_id from d limit 1)), 'failed', 'the queued ideas job is cancelled');
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000e2');
+select throws_ok($$ select api.discard_batch((select batch_id from d limit 1)) $$, 'PT404', null, 'someone else''s round is not found');
 
 select * from finish();
 rollback;
