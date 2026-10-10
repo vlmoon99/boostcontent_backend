@@ -196,6 +196,8 @@ posts, quotas (per-user override), plans, failed jobs. Backed by a second PostgR
 | `S3_PUBLIC_ENDPOINT` / `S3_INTERNAL_ENDPOINT` | what apps use (`https://boostcontent.io`) / what inference uses (`http://100.64.0.1:3900`) |
 | `S3_ACCESS_KEY` (`GK` + 24 hex), `S3_SECRET_KEY` (64 hex) | imported into Garage by `garage-init.sh` |
 | `REPL_PASSWORD`, `NODES` | the cluster: followers stream with the first; the second is every node in priority order |
+| `ALERT_URL` | empty = off. The watchdog POSTs `{"text": "..."}` there when something is wrong (see below) |
+| `OFFSITE_REMOTE`, `OFFSITE_PASSPHRASE` | empty = off. Where the encrypted off-site copy goes, and what encrypts it |
 | the rest | random secrets: DB/role passwords, `JWT_SECRET` (GoTrue ⇄ PostgREST), `ADMIN_JWT_SECRET`, Garage RPC/admin |
 
 ## More than one machine: master, followers, takeover
@@ -235,11 +237,26 @@ master through Cloudflare, the returning node yielding and re-cloning, pictures 
   containers, and `node.sh promote` on a follower is the manual override.
 * **Up to a minute of pictures** can be missing after a takeover (the sync interval); changes in the database
   from the last second or so.
-* **Generation needs the inference gateway** (`INFERENCE_URL`, on dgx-spark). With that machine off, the site,
-  sign-in and existing posts work from the new master, and new posts wait in the queue.
+* **Generation uses the node's own inference gateway** (`INFERENCE_URL`), and the inference system is clustered
+  the same way, so posts keep generating from the new master.
 * The admin console is on the master: `http://<master's tailnet IP>:3200`.
-* Takeover was tested by stopping the stack and telling the follower to treat that as a dead host
-  (`NODE_NO_PING=1`); a real power-off of the master has not been done yet.
+* **Never tried on a real power loss.** Takeover was tested by stopping the stack and telling the follower to
+  treat that as a dead host (`NODE_NO_PING=1`). The first real outage is the test; what to check after one is in
+  inference_system's README ("Never tried on a real power loss").
+
+### Alerts and the off-site copy (both off until set)
+
+`ALERT_URL`: the watchdog POSTs `{"text": "..."}` there when it takes over, when two masters meet, when a node
+stops answering (and when it is back), when `PUBLIC_URL` has not answered from outside for 2 minutes, when no
+dump is newer than 26 hours, when no off-site copy succeeded for 3 days. A Telegram bot URL
+(`https://api.telegram.org/bot<token>/sendMessage?chat_id=<id>`) or a Slack webhook works as it is.
+`deploy/node.sh alert` sends a test message. The same lines are always in the journal as `ALERT:`.
+
+`OFFSITE_REMOTE` + `OFFSITE_PASSPHRASE`: once a day the master copies the dumps and every picture to that
+[rclone remote](https://rclone.org/docs/#connection-strings), encrypted before they leave, and tries again every
+hour while it fails (a sleeping Mac is fine; for `:sftp,…,pass=` the password must go through `rclone obscure` first). Pictures are only ever added there, never deleted.
+**Keep the passphrase somewhere that is not a Spark**: without it the copy is noise. To restore, point an rclone
+`crypt` remote with the same two values at it: dumps are in `db/`, pictures in `pictures/`.
 
 ## Moving to the cloud
 

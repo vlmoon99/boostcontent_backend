@@ -199,6 +199,33 @@ services:
     entrypoint: ["sh", "-c", "while true; do rclone copy src:$$BUCKET dst:$$BUCKET --transfers 8 -q || echo \"$$(date -u +%FT%TZ) picture sync FAILED\"; sleep ${SYNC_EVERY:-60}; done"]
     depends_on: [garage]
 
+  # Off-site copy of the dumps and the pictures, encrypted before they leave (rclone crypt). Off until
+  # OFFSITE_REMOTE is set. node.sh runs it on the master once a day and tries again every hour until it succeeds.
+  offsite:
+    profiles: [tools]
+    image: rclone/rclone:1.71
+    container_name: bc-offsite
+    environment:
+      RCLONE_CONFIG_SRC_TYPE: s3
+      RCLONE_CONFIG_SRC_PROVIDER: Other
+      RCLONE_CONFIG_SRC_ENDPOINT: http://garage:3900
+      RCLONE_CONFIG_SRC_ACCESS_KEY_ID: ${S3_ACCESS_KEY}
+      RCLONE_CONFIG_SRC_SECRET_ACCESS_KEY: ${S3_SECRET_KEY}
+      RCLONE_CONFIG_SRC_REGION: garage
+      RCLONE_CONFIG_SRC_FORCE_PATH_STYLE: "true"
+      BUCKET: ${S3_BUCKET}
+      OFFSITE_REMOTE: ${OFFSITE_REMOTE:-}
+      OFFSITE_PASSPHRASE: ${OFFSITE_PASSPHRASE:-}
+    volumes: ["${BACKUP_DIR:-./.data/backups}:/backups"]
+    entrypoint:
+      - sh
+      - -c
+      - |
+        export RCLONE_CONFIG_OFF_TYPE=crypt RCLONE_CONFIG_OFF_REMOTE="$$OFFSITE_REMOTE"
+        export RCLONE_CONFIG_OFF_PASSWORD="$$(rclone obscure "$$OFFSITE_PASSPHRASE")"
+        rclone sync /backups off:db --include '*.dump' && rclone copy src:$$BUCKET off:pictures --transfers 8 \
+          && touch /backups/.offsite-ok && echo done || { echo FAILED; exit 1; }
+
 volumes:
   db_data:
   garage_meta:

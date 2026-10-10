@@ -4,6 +4,7 @@
 #   deploy/node.sh run       the loop (user unit bc-node.service runs it; it is the only thing that starts the stack)
 #   deploy/node.sh status    every node's role, as this node sees it
 #   deploy/node.sh promote   make THIS node the master now (the old master, if alive, yields on its next tick)
+#   deploy/node.sh alert     send a test alert
 #
 # NODES in .env lists every node in priority order ("tailnetIP[/lanIP] ..."), the same on all nodes.
 # The rules, all of them:
@@ -16,6 +17,8 @@
 #   4. Two masters (a node came back, or the nodes lost sight of each other): the one promoted LAST wins
 #      (Postgres timeline; a tie goes to the higher priority). The loser dumps its database to
 #      .data/backups/before-reclone-*.dump, throws its copy away and re-clones as a follower.
+# It also tells you when something is wrong (alert) and sends the dumps and pictures off-site (offsite): both are
+# off until ALERT_URL / OFFSITE_REMOTE are set in .env.
 # No voting: all nodes sit in one room on one switch. Across sites this needs a quorum (rule 3 can then
 # promote on a network split), which is a different tool (Patroni).
 set -uo pipefail
@@ -27,6 +30,7 @@ read -ra N <<<"$NODES"
 ME=-1; for i in "${!N[@]}"; do [ "${N[$i]%%/*}" = "$TAILNET_IP" ] && ME=$i; done
 [ "$ME" -ge 0 ] || { echo "TAILNET_IP $TAILNET_IP is not in NODES"; exit 1; }
 MASTER_SVC=(auth rest rest-admin caddy cloudflared)
+BACKUPS=${BACKUP_DIR:-./.data/backups}
 Q="select case when pg_is_in_recovery() then 't 0' else 'f ' || ('x' || substr(pg_walfile_name(pg_current_wal_lsn()), 1, 8))::bit(32)::int end"
 
 log() { echo "$(date -u +%FT%TZ) node$ME($TAILNET_IP) $*"; }
@@ -43,6 +47,55 @@ probe() {
 pings() {      # the host itself answers on any path (NODE_NO_PING=1: a test knob, the database port alone decides)
   [ "${NODE_NO_PING:-0}" = 1 ] && return 1
   local ip; for ip in ${1//\// }; do ping -c1 -W2 "$ip" >/dev/null 2>&1 && return 0; done; return 1
+}
+
+# ALERT_URL (empty = off) gets every alert as a POST of {"text": "..."}: a Telegram bot
+# (https://api.telegram.org/bot<token>/sendMessage?chat_id=<id>) or a Slack webhook takes that as it is.
+alert() {
+  log "ALERT: $*"
+  [ -n "${ALERT_URL:-}" ] || return 0
+  python3 -c 'import json, sys; print(json.dumps({"text": sys.argv[1]}))' "boostcontent node$ME ($TAILNET_IP): $*" |
+    curl -sf -o /dev/null --max-time 10 -H 'Content-Type: application/json' -d @- "$ALERT_URL" || log "the alert could not be delivered"
+}
+# watch <name> <1 = fine> <secs> <what is wrong>: one alert once it has been wrong for <secs>, one when it is fine again
+declare -A BAD_SINCE ALERTED
+watch() {
+  local now; now=$(date +%s)
+  if [ "$2" = 1 ]; then
+    [ -n "${ALERTED[$1]:-}" ] && alert "$1: fine again"
+    unset "BAD_SINCE[$1]" "ALERTED[$1]"; return 0
+  fi
+  : "${BAD_SINCE[$1]:=$now}"
+  if [ -z "${ALERTED[$1]:-}" ] && (( now - BAD_SINCE[$1] >= $3 )); then ALERTED[$1]=1; alert "$1: $4"; fi
+}
+
+checks() {     # every 30 s; these only tell, they change nothing
+  local now c f i master=; now=$(date +%s)
+  (( now - ${CHECKED:-0} >= 30 )) || return 0; CHECKED=$now
+  f=$(ls -t "$BACKUPS"/boostcontent-*.dump 2>/dev/null | head -1)
+  watch "nightly backup" "$([ -n "$f" ] && (( now - $(stat -c %Y "$f") < 93600 )) && echo 1)" 3600 "no database dump newer than 26 hours"
+  [[ "$MINE" == f\ * ]] && master=1
+  for i in "${!N[@]}"; do
+    [ "$i" = "$ME" ] && continue
+    [[ "${ROLE[$i]:-}" == f\ * ]] && master=1
+    [[ "$MINE" == f\ * ]] && watch "node$i (${N[$i]%%/*})" "$([ -n "${ROLE[$i]:-}" ] && echo 1)" "$FAIL_SECS" "does not answer; there is no second copy until it returns"
+  done
+  watch "database" "$master" 120 "no node is the master: the app is down"
+  if [[ "$MINE" == f\ * ]]; then            # the way the app sees it: Cloudflare → tunnel → entry → sign-in service
+    c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "$PUBLIC_URL/auth/v1/health")
+    watch "$PUBLIC_URL" "$([ "$c" = 200 ] && echo 1)" 120 "has not answered from outside for 2 minutes (last status: $c)"
+  fi
+  offsite
+}
+
+# Off-site copy (compose service "offsite"): on the master, once a day; a failed run is tried again every hour.
+offsite() {
+  [ -n "${OFFSITE_REMOTE:-}" ] && [[ "$MINE" == f\ * ]] || return 0
+  local now last; now=$(date +%s); last=$(stat -c %Y "$BACKUPS/.offsite-ok" 2>/dev/null || echo 0)
+  watch "off-site backup" "$( (( now - (last > STARTED ? last : STARTED) < 259200 )) && echo 1)" 0 "no copy has left this room for 3 days"
+  (( now - last >= 86400 && now - ${OFFSITE_TRIED:-0} >= 3600 )) || return 0
+  OFFSITE_TRIED=$now
+  ( dc --profile tools run --rm -T --no-deps offsite 2>&1 | grep -v 'Container \|Config file' | tail -3 | while read -r l; do log "off-site backup: $l"; done ) &
 }
 
 # A container Docker itself failed to start at boot (tailnet IP missing) comes up afterwards WITHOUT its
@@ -102,7 +155,7 @@ ensure_follower() {   # of node $1
 }
 
 promote() {
-  log "PROMOTING: this node becomes the master"
+  alert "TAKEOVER: this node becomes the master (public API, tunnel and all)"
   docker exec -u postgres bc-db pg_ctl promote -w -t 60 2>&1 | tail -1
   dc restart db >/dev/null 2>&1      # same data, now with the master's command (pg_cron + pg_net)
   ensure_master
@@ -110,7 +163,7 @@ promote() {
 
 tick() {
   local mine i r tl best_i=-1 best_tl=-1 mytl was
-  mine=$(local_role)
+  mine=$(local_role); MINE=$mine
   for i in "${!N[@]}"; do
     [ "$i" = "$ME" ] && continue
     r=$(probe "${N[$i]%%/*}"); ROLE[$i]=$r
@@ -120,7 +173,7 @@ tick() {
     f\ *)
       mytl=${mine#f }
       if (( best_i >= 0 )) && { (( best_tl > mytl )) || { (( best_tl == mytl )) && (( best_i < ME )); }; }; then
-        log "two masters: node$best_i (timeline $best_tl) beats this node (timeline $mytl); yielding"
+        alert "two masters: node$best_i (timeline $best_tl) beats this node (timeline $mytl); this node saves its database to a dump and becomes a follower"
         clone_from "$best_i"
       else
         ensure_master
@@ -156,11 +209,12 @@ case "${1:-status}" in
     for i in $(seq 120); do ip -4 addr | grep -q " ${TAILNET_IP}/" && break; sleep 5; done   # Docker starts before tailscaled
     for i in $(seq 60); do docker info >/dev/null 2>&1 && break; sleep 5; done
     log "watchdog started (priority $ME of ${#N[@]}, takeover after ${FAIL_SECS}s)"
-    declare -a ROLE; DOWN_SINCE=0; LAST_MASTER=; WAITING=
-    while true; do tick; sleep "$TICK"; done ;;
+    declare -a ROLE; DOWN_SINCE=0; LAST_MASTER=; WAITING=; MINE=; STARTED=$(date +%s)
+    while true; do tick; checks; sleep "$TICK"; done ;;
   promote)
     [[ "$(local_role)" == t\ * ]] || { echo "this node is not a healthy follower: $(local_role)"; exit 1; }
     promote ;;
+  alert) shift; alert "${*:-test message from deploy/node.sh alert}" ;;
   status)
     for i in "${!N[@]}"; do
       if [ "$i" = "$ME" ]; then r=$(local_role); else r=$(probe "${N[$i]%%/*}"); fi
@@ -173,5 +227,5 @@ case "${1:-status}" in
       docker exec bc-db psql -X -U postgres -tAc "select 'follower ' || client_addr || ' ' || state || ', lag ' || coalesce(replay_lag::text, '0') from pg_stat_replication" 2>/dev/null
     fi
     echo "containers: $(docker ps --format '{{.Names}}' | grep '^bc-' | sort | paste -sd' ')" ;;
-  *) echo "usage: $0 run|status|promote"; exit 1 ;;
+  *) echo "usage: $0 run|status|promote|alert"; exit 1 ;;
 esac
