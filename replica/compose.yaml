@@ -33,8 +33,9 @@ services:
     container_name: bc-replica-dumps
     restart: unless-stopped
     user: "${RUN_AS:-1000:1000}"
+    network_mode: "service:db"            # 127.0.0.1 is the standby itself (pg_hba: trust), so no password lives here
     volumes: ["${BACKUP_DIR:-./.data}/dumps:/backups"]
-    entrypoint: ["bash", "-c", "while true; do f=/backups/boostcontent-$$(date -u +%Y%m%dT%H%M).dump; pg_dump -h db -U postgres -Fc boostcontent > $$f.tmp && mv $$f.tmp $$f && echo dump $$f $$(du -h $$f | cut -f1) || rm -f $$f.tmp; find /backups -name 'boostcontent-*.dump' -mtime +14 -delete; sleep 86400; done"]
+    entrypoint: ["bash", "-c", "while true; do f=/backups/boostcontent-$$(date -u +%Y%m%dT%H%M).dump; pg_dump -h 127.0.0.1 -U postgres -Fc boostcontent > $$f.tmp && mv $$f.tmp $$f && echo dump $$f $$(du -h $$f | cut -f1) || rm -f $$f.tmp; find /backups -name 'boostcontent-*.dump' -mtime +14 -delete; sleep 86400; done"]
     depends_on:
       db: {condition: service_healthy}
 
