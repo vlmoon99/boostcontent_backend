@@ -14,6 +14,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=build /out/ /
 COPY init/ /docker-entrypoint-initdb.d/
 COPY pg_hba.conf /etc/postgresql/pg_hba.conf
+COPY entry.sh /usr/local/bin/bc-entry.sh
+ENTRYPOINT ["bc-entry.sh"]
 CMD ["postgres", "-c", "shared_preload_libraries=pg_cron,pg_net", "-c", "cron.database_name=boostcontent", \
      "-c", "cron.use_background_workers=on", "-c", "max_worker_processes=20", "-c", "pg_net.ttl=1 day", "-c", "pg_net.database_name=boostcontent", \
      "-c", "hba_file=/etc/postgresql/pg_hba.conf", "-c", "max_slot_wal_keep_size=8GB"]

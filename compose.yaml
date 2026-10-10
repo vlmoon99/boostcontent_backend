@@ -1,5 +1,8 @@
 # BoostContent backend: everything in one file, so the same stack runs on the Spark or any cloud VM.
-#   cp .env.example .env  (fill it)   docker compose up -d --build   scripts/garage-init.sh (first time)   ./smoke.sh
+# Every node runs this file. deploy/node.sh (the node watchdog, a user systemd unit) decides the role:
+#   master    db (read-write) + garage + backup + profile `master` (the API, the entry, the tunnel)
+#   follower  db (standby, streams from the master) + garage + backup + profile `follower` (picture sync)
+# Don't `docker compose up` by hand on a clustered node: use deploy/node.sh (status | promote | run).
 # Public entry: cloudflared → caddy :3100 (/auth/v1 GoTrue, /rest/v1 PostgREST, /bc-media Garage).
 # Owner console: caddy :3200 on the tailnet IP only. Inference: LiteLLM at INFERENCE_URL (tailnet).
 name: bc
@@ -18,7 +21,7 @@ services:
       ADMIN_AUTHENTICATOR_PASSWORD: ${ADMIN_AUTHENTICATOR_PASSWORD}
     ports:
       - "127.0.0.1:5442:5432"
-      - "${TAILNET_IP}:5442:5432"         # the standby (replica/) streams from here; tailnet only, password logins
+      - "${TAILNET_IP}:5442:5432"         # followers stream from here; tailnet only, password logins
     volumes: ["db_data:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d boostcontent"]
@@ -26,6 +29,7 @@ services:
       retries: 30
 
   migrate:
+    profiles: [master]
     image: ghcr.io/amacneil/dbmate:2.28.0
     container_name: bc-migrate
     environment:
@@ -38,16 +42,17 @@ services:
       db: {condition: service_healthy}
 
   configure:                      # secrets + knobs → private.settings (idempotent, every `up`)
+    profiles: [master]
     image: postgres:17-bookworm
     container_name: bc-configure
     environment:
       PGPASSWORD: ${DB_PASSWORD}
-      REPL_PASSWORD: ${REPL_PASSWORD:-}   # set → role `replicator` exists with this password (see replica/)
+      REPL_PASSWORD: ${REPL_PASSWORD:-}   # role `replicator`: followers stream with it, nodes ask each other's role with it
       S: >-
         inference_url=${INFERENCE_URL}
         inference_key=${INFERENCE_KEY}
         s3_public_endpoint=${S3_PUBLIC_ENDPOINT}
-        s3_internal_endpoint=${S3_INTERNAL_ENDPOINT}
+        s3_internal_endpoint=${S3_INTERNAL_ENDPOINT:-http://${TAILNET_IP}:3900}
         s3_bucket=${S3_BUCKET}
         s3_region=garage
         s3_access_key=${S3_ACCESS_KEY}
@@ -59,6 +64,7 @@ services:
       migrate: {condition: service_completed_successfully}
 
   auth:
+    profiles: [master]
     image: supabase/gotrue:v2.177.0
     container_name: bc-auth
     restart: unless-stopped
@@ -87,6 +93,7 @@ services:
       db: {condition: service_healthy, restart: true}
 
   rest:
+    profiles: [master]
     image: postgrest/postgrest:v13.0.4
     container_name: bc-rest
     restart: unless-stopped
@@ -103,6 +110,7 @@ services:
       configure: {condition: service_completed_successfully}
 
   rest-admin:
+    profiles: [master]
     image: postgrest/postgrest:v13.0.4
     container_name: bc-rest-admin
     restart: unless-stopped
@@ -132,6 +140,7 @@ services:
       - "garage_data:/var/lib/garage/data"
 
   caddy:
+    profiles: [master]
     build: {context: ., dockerfile: edge/Dockerfile}
     image: bc/caddy:local
     container_name: bc-caddy
@@ -142,25 +151,50 @@ services:
     depends_on: [auth, rest, rest-admin, garage]
 
   cloudflared:
+    profiles: [master]
     image: cloudflare/cloudflared:2025.9.1
     container_name: bc-cloudflared
-    restart: unless-stopped
+    restart: "no"                         # only node.sh starts the tunnel, once it knows this node is THE master
     network_mode: host                    # the tunnel's public hostname points at localhost:3100
     environment:
       TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
     command: ["tunnel", "--no-autoupdate", "run"]
     depends_on: [caddy]
 
-  backup:                         # pg_dump at start and every 24 h; keeps 14 days
+  backup:                         # pg_dump at start and every 24 h (a failed one retries in 5 min); keeps 14 days
     image: postgres:17-bookworm
     container_name: bc-backup
     restart: unless-stopped
     environment:
       PGPASSWORD: ${DB_PASSWORD}
     volumes: ["${BACKUP_DIR:-./.data/backups}:/backups"]
-    entrypoint: ["bash", "-c", "while true; do f=/backups/boostcontent-$$(date -u +%Y%m%dT%H%M).dump; pg_dump -h db -U postgres -Fc boostcontent > $$f.tmp && mv $$f.tmp $$f && echo backup $$f $$(du -h $$f | cut -f1); find /backups -name 'boostcontent-*.dump' -mtime +14 -delete; sleep 86400; done"]
+    entrypoint: ["bash", "-c", "while true; do f=/backups/boostcontent-$$(date -u +%Y%m%dT%H%M).dump; if pg_dump -h db -U postgres -Fc boostcontent > $$f.tmp && mv $$f.tmp $$f; then echo backup $$f $$(du -h $$f | cut -f1); find /backups -name 'boostcontent-*.dump' -mtime +14 -delete; sleep 86400; else rm -f $$f.tmp; echo 'backup FAILED, again in 5 min'; sleep 300; fi; done"]
     depends_on:
       db: {condition: service_healthy}
+
+  sync:                           # follower only: the master's pictures → this node's Garage, every minute, never deletes
+    profiles: [follower]
+    image: rclone/rclone:1.71
+    container_name: bc-sync
+    restart: unless-stopped
+    environment:
+      RCLONE_CONFIG_SRC_TYPE: s3
+      RCLONE_CONFIG_SRC_PROVIDER: Other
+      RCLONE_CONFIG_SRC_ENDPOINT: http://${MASTER_IP:-127.0.0.1}:3900     # node.sh sets MASTER_IP
+      RCLONE_CONFIG_SRC_ACCESS_KEY_ID: ${S3_ACCESS_KEY}
+      RCLONE_CONFIG_SRC_SECRET_ACCESS_KEY: ${S3_SECRET_KEY}
+      RCLONE_CONFIG_SRC_REGION: garage
+      RCLONE_CONFIG_SRC_FORCE_PATH_STYLE: "true"
+      RCLONE_CONFIG_DST_TYPE: s3
+      RCLONE_CONFIG_DST_PROVIDER: Other
+      RCLONE_CONFIG_DST_ENDPOINT: http://garage:3900
+      RCLONE_CONFIG_DST_ACCESS_KEY_ID: ${S3_ACCESS_KEY}
+      RCLONE_CONFIG_DST_SECRET_ACCESS_KEY: ${S3_SECRET_KEY}
+      RCLONE_CONFIG_DST_REGION: garage
+      RCLONE_CONFIG_DST_FORCE_PATH_STYLE: "true"
+      BUCKET: ${S3_BUCKET}
+    entrypoint: ["sh", "-c", "while true; do rclone copy src:$$BUCKET dst:$$BUCKET --transfers 8 -q || echo \"$$(date -u +%FT%TZ) picture sync FAILED\"; sleep ${SYNC_EVERY:-60}; done"]
+    depends_on: [garage]
 
 volumes:
   db_data:

@@ -1,0 +1,12 @@
+# ~/.config/systemd/user/bc-node.service  (cp + systemctl --user enable --now; linger keeps it at boot)
+[Unit]
+Description=boostcontent_backend node watchdog: master/follower role, takeover, the whole stack
+After=default.target
+
+[Service]
+ExecStart=%h/Documents/dev/boostcontent_backend/deploy/node.sh run
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
