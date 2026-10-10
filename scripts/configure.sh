@@ -10,4 +10,10 @@ for kv in $S; do
 done
 sql+=" commit;"
 psql -h db -U postgres -d boostcontent -v ON_ERROR_STOP=1 -qc "$sql"
+if [ -n "${REPL_PASSWORD:-}" ]; then      # the streaming-replication login for replica/ (idempotent)
+  psql -h db -U postgres -d boostcontent -v ON_ERROR_STOP=1 -q -v pw="$REPL_PASSWORD" <<'SQL'
+select format('%s role replicator login replication password %L',
+              case when exists (select 1 from pg_roles where rolname = 'replicator') then 'alter' else 'create' end, :'pw') \gexec
+SQL
+fi
 echo "settings: $(psql -h db -U postgres -d boostcontent -tAc 'select string_agg(key, $$, $$ order by key) from private.settings')"

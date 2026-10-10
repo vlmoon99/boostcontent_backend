@@ -1,0 +1,57 @@
+# The second machine: a live copy of the primary, so one dead box loses nothing.
+#   db      hot standby, streams every change from the primary as it happens (read-only; promote = new primary)
+#   dumps   pg_dump of the standby every 24 h, 14 days kept (protects against a bad migration or a deleted row,
+#           which replication copies faithfully)
+#   media   hourly one-way copy of the picture bucket; never deletes, so a wiped bucket is still here
+#   cp .env.example .env  (fill it)   docker compose up -d --build   ./status.sh
+# The same file works anywhere that reaches the primary's :5442 and S3 endpoint (another VM, a cloud region).
+name: bc-replica
+
+services:
+  db:
+    build: ../db
+    image: bc/db:local
+    container_name: bc-replica-db
+    restart: unless-stopped
+    environment:
+      PRIMARY_HOST: ${PRIMARY_HOST}
+      PRIMARY_PORT: ${PRIMARY_PORT:-5442}
+      PGPASSWORD: ${REPL_PASSWORD}
+      SLOT: ${SLOT:-replica1}
+    ports: ["127.0.0.1:5442:5432"]
+    volumes:
+      - "db_data:/var/lib/postgresql/data"
+      - "./standby.sh:/standby.sh:ro"
+    entrypoint: ["bash", "/standby.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d boostcontent"]
+      interval: 5s
+      retries: 60
+
+  dumps:
+    image: postgres:17-bookworm
+    container_name: bc-replica-dumps
+    restart: unless-stopped
+    user: "${RUN_AS:-1000:1000}"
+    volumes: ["${BACKUP_DIR:-./.data}/dumps:/backups"]
+    entrypoint: ["bash", "-c", "while true; do f=/backups/boostcontent-$$(date -u +%Y%m%dT%H%M).dump; pg_dump -h db -U postgres -Fc boostcontent > $$f.tmp && mv $$f.tmp $$f && echo dump $$f $$(du -h $$f | cut -f1) || rm -f $$f.tmp; find /backups -name 'boostcontent-*.dump' -mtime +14 -delete; sleep 86400; done"]
+    depends_on:
+      db: {condition: service_healthy}
+
+  media:
+    image: amazon/aws-cli:2.27.0
+    container_name: bc-replica-media
+    restart: unless-stopped
+    user: "${RUN_AS:-1000:1000}"
+    environment:
+      HOME: /tmp
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY}
+      AWS_DEFAULT_REGION: garage
+      AWS_ENDPOINT_URL: ${S3_ENDPOINT}
+      BUCKET: ${S3_BUCKET:-bc-media}
+    volumes: ["${BACKUP_DIR:-./.data}/media:/media"]
+    entrypoint: ["sh", "-c", "while true; do aws s3 sync s3://$$BUCKET /media --only-show-errors && echo \"media synced $$(date -u +%FT%TZ): $$(find /media -type f | wc -l) objects\" || echo 'media sync FAILED'; sleep ${MEDIA_EVERY:-3600}; done"]
+
+volumes:
+  db_data:
