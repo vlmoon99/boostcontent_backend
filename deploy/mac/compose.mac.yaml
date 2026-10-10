@@ -1,0 +1,15 @@
+# One Mac as the whole server (no tailnet, no cluster). Used only through deploy/mac/up.sh:
+#   docker compose -f compose.yaml -f deploy/mac/compose.mac.yaml ...
+# The base file publishes every port twice (127.0.0.1 and the tailnet IP); here there is no tailnet,
+# so each list is replaced. Caddy listens on every interface so a phone on the same Wi-Fi reaches it.
+services:
+  db:
+    ports: !override
+      - "127.0.0.1:5442:5432"
+  garage:
+    ports: !override
+      - "127.0.0.1:3900:3900"
+  caddy:
+    ports: !override
+      - "0.0.0.0:3100:3100"
+      - "127.0.0.1:3200:3200"
