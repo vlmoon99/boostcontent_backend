@@ -18,7 +18,7 @@ services:
       ADMIN_AUTHENTICATOR_PASSWORD: ${ADMIN_AUTHENTICATOR_PASSWORD}
     ports:
       - "127.0.0.1:5442:5432"
-      - "${TAILNET_IP}:5442:5432"         # the standby (replica/) streams from here; pg_hba allows replication only
+      - "${TAILNET_IP}:5442:5432"         # the standby (replica/) streams from here; tailnet only, password logins
     volumes: ["db_data:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d boostcontent"]
