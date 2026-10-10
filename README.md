@@ -87,22 +87,19 @@ PostgREST's JSON: `{"code", "message", "details", "hint"}`. **Branch on `details
 | *(null)*, `code` `42501` | 401 | no token |
 | *(null)*, `code` `PGRST3xx` | 401 | token expired or malformed: refresh, then repeat the call |
 
-### From Dart
+### From Dart (dio)
 
-Plain HTTP with `package:http`: no SDK is needed. This is your own PostgREST API; the only borrowed piece is the
-auth server (GoTrue, open source, runs in this compose), and the app talks to it with the two calls above.
+Plain HTTP: no SDK is needed. This is your own PostgREST API; the only borrowed piece is the auth server
+(GoTrue, open source, runs in this compose), and the app talks to it with the two calls above.
 
 ```dart
-import 'dart:convert';
-import 'package:http/http.dart' as http;
+import 'package:dio/dio.dart';
 
-const base = 'https://boostcontent.io';
+final dio = Dio(BaseOptions(baseUrl: 'https://boostcontent.io', contentType: 'application/json'));
 String? accessToken, refreshToken;          // keep both in flutter_secure_storage
 
 Future<void> _session(String path, Map body) async {
-  final r = await http.post(Uri.parse('$base/auth/v1/$path'),
-      headers: {'content-type': 'application/json'}, body: jsonEncode(body));
-  final d = jsonDecode(r.body);
+  final d = (await dio.post('/auth/v1/$path', data: body)).data;
   accessToken = d['access_token'];
   refreshToken = d['refresh_token'];
 }
@@ -110,39 +107,58 @@ Future<void> _session(String path, Map body) async {
 Future<void> signInGuest() => _session('signup', {});
 Future<void> refresh() => _session('token?grant_type=refresh_token', {'refresh_token': refreshToken});
 
-Map<String, String> get _h => {'authorization': 'Bearer $accessToken', 'content-type': 'application/json'};
+void setupAuth() => dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (o, h) {                    // the token goes only to the API, never to /auth or to storage
+        if (o.path.startsWith('/rest/v1/') && accessToken != null) {
+          o.headers['authorization'] = 'Bearer $accessToken';
+        }
+        h.next(o);
+      },
+      onError: (e, h) async {                // expired token: refresh once, repeat the call
+        final o = e.requestOptions;
+        if (e.response?.statusCode == 401 && o.path.startsWith('/rest/v1/') &&
+            o.extra['retried'] != true && refreshToken != null) {
+          try {
+            await refresh();
+            o.extra['retried'] = true;
+            return h.resolve(await dio.fetch(o));
+          } on DioException catch (again) {
+            return h.next(again);
+          }
+        }
+        h.next(e);
+      },
+    ));
 
-class ApiError implements Exception {
-  ApiError(this.status, this.code, this.message);
-  final int status;
-  final String? code;                        // quota_exceeded, not_found, … (the `details` field)
-  final String message;
-}
-
-dynamic _read(http.Response r) {
-  if (r.statusCode < 300) return r.body.isEmpty ? null : jsonDecode(r.body);
-  final e = jsonDecode(r.body);
-  throw ApiError(r.statusCode, e['details'], e['message'] ?? '');
-}
+/// The stable error code (quota_exceeded, not_found, …) of a failed call, or null.
+String? apiCode(DioException e) => e.response?.data is Map ? e.response!.data['details'] as String? : null;
 
 Future<dynamic> rpc(String fn, [Map<String, dynamic> args = const {}]) async =>
-    _read(await http.post(Uri.parse('$base/rest/v1/rpc/$fn'), headers: _h, body: jsonEncode(args)));
+    (await dio.post('/rest/v1/rpc/$fn', data: args)).data;        // '' for the 204 answers
 
-Future<List> list(String view, [String query = '']) async =>
-    _read(await http.get(Uri.parse('$base/rest/v1/$view?$query'), headers: _h));
+Future<List> list(String view, [Map<String, dynamic>? query]) async =>
+    (await dio.get('/rest/v1/$view', queryParameters: query)).data as List;
 
 // guest → business → photo → posts
+setupAuth();
 await signInGuest();
 final biz = await rpc('create_business', {'name': 'Bakery', 'language': 'uk'});
 final up = await rpc('upload_url', {'business_id': biz['id'], 'content_type': 'image/jpeg'});
-await http.put(Uri.parse(up['put_url']), body: bytes);          // the bytes only, no headers
+await dio.put(up['put_url'], data: bytes,                          // Uint8List; the URL is absolute
+    options: Options(contentType: 'image/jpeg', headers: {Headers.contentLengthHeader: bytes.length}));
 await rpc('photo_uploaded', {'media_id': up['media_id']});
 final posts = await rpc('generate_posts', {'business_id': biz['id'], 'n': 3});
-final batch = await list('posts', 'batch_id=eq.${posts[0]['batch_id']}');   // poll every ~3 s
+final batch = await list('posts', {'batch_id': 'eq.${posts[0]['batch_id']}'});   // poll every ~3 s
+
+try {
+  await rpc('generate_posts', {'business_id': biz['id'], 'n': 10});
+} on DioException catch (e) {
+  if (apiCode(e) == 'quota_exceeded') { /* show the paywall */ }
+}
 ```
 
-On a `401`, call `refresh()` and repeat the request once. The HTTP calls are what `./smoke.sh` runs on every
-release; this Dart code itself has not been run against a real app yet.
+The HTTP calls are what `./smoke.sh` runs on every release; this Dart code itself has not been run against a
+real app yet.
 
 ## How generation works
 
