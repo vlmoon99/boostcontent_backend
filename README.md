@@ -191,7 +191,39 @@ posts, quotas (per-user override), plans, failed jobs. Backed by a second PostgR
 | `INFERENCE_URL`, `INFERENCE_KEY` | the inference gateway + BoostContent's project key |
 | `S3_PUBLIC_ENDPOINT` / `S3_INTERNAL_ENDPOINT` | what apps use (`https://boostcontent.io`) / what inference uses (`http://100.64.0.1:3900`) |
 | `S3_ACCESS_KEY` (`GK` + 24 hex), `S3_SECRET_KEY` (64 hex) | imported into Garage by `garage-init.sh` |
+| `REPL_PASSWORD` | optional; the standby's replication login (see replica/) |
 | the rest | random secrets: DB/role passwords, `JWT_SECRET` (GoTrue ⇄ PostgREST), `ADMIN_JWT_SECRET`, Garage RPC/admin |
+
+## The second machine (replica/)
+
+`replica/compose.yaml` runs on another box (today dgx-spark-2, `~/boostcontent_backend/replica`) and keeps a
+live copy of everything the primary holds:
+
+| Service | What it keeps | How fresh |
+|---|---|---|
+| `bc-replica-db` | a hot standby: Postgres streaming replication from the primary's `:5442` through slot `replica1` | about a second behind |
+| `bc-replica-dumps` | `pg_dump` of the standby in `replica/.data/dumps`, 14 days | daily |
+| `bc-replica-media` | the picture bucket in `replica/.data/media`, copied with a read-only key; never deletes | hourly |
+
+`replica/status.sh` on that box says whether it is streaming (exit 0 = healthy). On the primary:
+`select * from pg_stat_replication`.
+
+What each part is for: the standby survives a dead primary disk with at most a second of loss; the dumps
+survive a mistake (a bad migration or a deleted row is replicated faithfully, a dump from yesterday isn't);
+the media copy survives a lost bucket, minus the last hour.
+
+What it is not, yet:
+* **Failover is manual and has not been rehearsed.** The outline: `docker exec -u postgres bc-replica-db
+  pg_ctl promote`, then run the main compose on that box against the promoted data (with the image's normal
+  command, so pg_cron + pg_net load), load `.data/media` into its Garage, and start cloudflared there (the
+  tunnel follows whichever box runs it).
+* **Reads are not spread.** The standby accepts read-only queries (a second PostgREST could serve `GET`s from
+  it), but the app talks to the primary only. At today's load one Postgres is far from its limit.
+* If the replica is off long enough for the primary to hold 8 GB of changes for it
+  (`max_slot_wal_keep_size`), the primary drops the slot's backlog and the standby has to be cloned again
+  (empty its `db_data` volume, `up`).
+
+In the cloud the same file runs on a second VM or region: point `PRIMARY_HOST` and `S3_ENDPOINT` at the primary.
 
 ## Moving to the cloud
 
