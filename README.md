@@ -74,18 +74,19 @@ Things the app has to know:
 
 ### Errors
 
-PostgREST's JSON: `{"code", "message", "details", "hint"}`. **Branch on `details`**, not on the HTTP status:
+PostgREST's JSON: `{"code", "message", "details", "hint"}`. The HTTP status says what kind of failure it is;
+`details` is the stable code to branch on.
 
-| `details` | HTTP | When |
+| HTTP | `details` | When |
 |---|---|---|
-| `quota_exceeded` | 400 | the month's posts or pictures are used up (`hint` has the numbers) |
-| `daily_cap` | 400 | the whole service hit its daily picture cap: try later |
-| `limit_businesses`, `limit_photos` | 400 | 50 businesses / 30 photos |
-| `bad_content_type`, `bad_n`, `bad_signal`, `bad_profile` | 400 | wrong argument |
-| `not_found` | **500** | the business / photo / post isn't yours or doesn't exist (PostgREST maps this SQL code to 500) |
-| `blocked` | 403 | the owner blocked the account |
-| *(null)*, `code` `42501` | 401 | no token |
-| *(null)*, `code` `PGRST3xx` | 401 | token expired or malformed: refresh, then repeat the call |
+| 400 | `bad_content_type`, `bad_n`, `bad_signal`, `bad_profile` | wrong argument |
+| 401 | `not_authenticated`, or null with `code` `42501` / `PGRST3xx` | no token, or it expired / is malformed: refresh, then repeat the call |
+| 402 | `quota_exceeded` | the month's posts or pictures are used up (`hint` has the numbers) |
+| 403 | `blocked` | the owner blocked the account |
+| 404 | `not_found` | the business / photo / post isn't yours or doesn't exist |
+| 409 | `limit_businesses`, `limit_photos` | 50 businesses / 30 photos |
+| 429 | `daily_cap` | the whole service hit its daily picture cap: try later |
+| 5xx | | the backend itself is broken: show "try again later" |
 
 ### From Dart (dio)
 
@@ -153,7 +154,7 @@ final batch = await list('posts', {'batch_id': 'eq.${posts[0]['batch_id']}'});  
 try {
   await rpc('generate_posts', {'business_id': biz['id'], 'n': 10});
 } on DioException catch (e) {
-  if (apiCode(e) == 'quota_exceeded') { /* show the paywall */ }
+  if (e.response?.statusCode == 402) { /* apiCode(e) == 'quota_exceeded': show the paywall */ }
 }
 ```
 

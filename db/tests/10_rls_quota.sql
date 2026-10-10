@@ -17,13 +17,13 @@ select is((api.me()->'limits'->>'images_month')::int, 3000, 'default plan: 3000 
 select pg_temp.as_user('00000000-0000-0000-0000-00000000000b');
 select is((select count(*)::int from api.businesses), 0, 'B does not see A''s business');
 select throws_ok(format($$ select api.update_business(%L, 'stolen') $$, (select id from private.businesses where name = 'A bakery')),
-                 'P0002', 'business not found', 'B cannot modify A''s business');
+                 'PT404', 'business not found', 'B cannot modify A''s business');
 select throws_ok(format($$ select api.generate_posts(%L, 1) $$, (select id from private.businesses where name = 'A bakery')),
-                 'P0002', 'business not found', 'B cannot generate on A''s business');
+                 'PT404', 'business not found', 'B cannot generate on A''s business');
 
 -- no token → nothing
 select set_config('request.jwt.claims', '', true);
-select throws_ok($$ select api.me() $$, '28000', 'sign in first', 'no JWT → not authenticated');
+select throws_ok($$ select api.me() $$, 'PT401', 'sign in first', 'no JWT → not authenticated');
 
 -- quota: A has 1000 posts; ask beyond the limit
 select pg_temp.as_user('00000000-0000-0000-0000-00000000000a');
@@ -37,7 +37,7 @@ select lives_ok(format($$ select api.generate_posts(%L, 2) $$, (select id from p
 select is((api.me()->'used'->>'posts')::int, 2, 'posts used = 2');
 select is((api.me()->'used'->>'images')::int, 6, 'images reserved = 2 × 3');
 select throws_ok(format($$ select api.generate_posts(%L, 1) $$, (select id from private.businesses where name = 'A bakery')),
-                 'P0001', 'monthly quota reached', 'the 3rd post is over quota');
+                 'PT402', 'monthly quota reached', 'the 3rd post is over quota');
 
 -- a failed ideas job gives everything back
 reset role;
