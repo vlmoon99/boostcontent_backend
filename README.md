@@ -87,30 +87,62 @@ PostgREST's JSON: `{"code", "message", "details", "hint"}`. **Branch on `details
 | *(null)*, `code` `42501` | 401 | no token |
 | *(null)*, `code` `PGRST3xx` | 401 | token expired or malformed: refresh, then repeat the call |
 
-### With `supabase_flutter`
+### From Dart
 
-The paths are Supabase's, so the client library fits, with one setting it needs: the API lives in schema `api`,
-and the client asks for `public` unless told (that fails with `406 PGRST106`).
+Plain HTTP with `package:http`: no SDK is needed. This is your own PostgREST API; the only borrowed piece is the
+auth server (GoTrue, open source, runs in this compose), and the app talks to it with the two calls above.
 
 ```dart
-await Supabase.initialize(
-  url: 'https://boostcontent.io',
-  anonKey: 'unused',                       // nothing checks it
-  postgrestOptions: const PostgrestClientOptions(schema: 'api'),
-);
-final db = Supabase.instance.client;
-if (db.auth.currentSession == null) await db.auth.signInAnonymously();   // session is persisted + refreshed
+import 'dart:convert';
+import 'package:http/http.dart' as http;
 
-final biz = await db.rpc('create_business', params: {'name': 'Bakery', 'language': 'uk'});
-final up = await db.rpc('upload_url', params: {'business_id': biz['id'], 'content_type': 'image/jpeg'});
-await http.put(Uri.parse(up['put_url']), body: bytes);                    // package:http, no headers
-await db.rpc('photo_uploaded', params: {'media_id': up['media_id']});
-final posts = await db.rpc('generate_posts', params: {'business_id': biz['id'], 'n': 3});
-final batch = await db.from('posts').select().eq('batch_id', posts[0]['batch_id']);   // poll this
+const base = 'https://boostcontent.io';
+String? accessToken, refreshToken;          // keep both in flutter_secure_storage
+
+Future<void> _session(String path, Map body) async {
+  final r = await http.post(Uri.parse('$base/auth/v1/$path'),
+      headers: {'content-type': 'application/json'}, body: jsonEncode(body));
+  final d = jsonDecode(r.body);
+  accessToken = d['access_token'];
+  refreshToken = d['refresh_token'];
+}
+
+Future<void> signInGuest() => _session('signup', {});
+Future<void> refresh() => _session('token?grant_type=refresh_token', {'refresh_token': refreshToken});
+
+Map<String, String> get _h => {'authorization': 'Bearer $accessToken', 'content-type': 'application/json'};
+
+class ApiError implements Exception {
+  ApiError(this.status, this.code, this.message);
+  final int status;
+  final String? code;                        // quota_exceeded, not_found, … (the `details` field)
+  final String message;
+}
+
+dynamic _read(http.Response r) {
+  if (r.statusCode < 300) return r.body.isEmpty ? null : jsonDecode(r.body);
+  final e = jsonDecode(r.body);
+  throw ApiError(r.statusCode, e['details'], e['message'] ?? '');
+}
+
+Future<dynamic> rpc(String fn, [Map<String, dynamic> args = const {}]) async =>
+    _read(await http.post(Uri.parse('$base/rest/v1/rpc/$fn'), headers: _h, body: jsonEncode(args)));
+
+Future<List> list(String view, [String query = '']) async =>
+    _read(await http.get(Uri.parse('$base/rest/v1/$view?$query'), headers: _h));
+
+// guest → business → photo → posts
+await signInGuest();
+final biz = await rpc('create_business', {'name': 'Bakery', 'language': 'uk'});
+final up = await rpc('upload_url', {'business_id': biz['id'], 'content_type': 'image/jpeg'});
+await http.put(Uri.parse(up['put_url']), body: bytes);          // the bytes only, no headers
+await rpc('photo_uploaded', {'media_id': up['media_id']});
+final posts = await rpc('generate_posts', {'business_id': biz['id'], 'n': 3});
+final batch = await list('posts', 'batch_id=eq.${posts[0]['batch_id']}');   // poll every ~3 s
 ```
 
-Not available: `db.storage`, realtime channels, email/OAuth sign-in. The HTTP calls above are what `./smoke.sh`
-runs on every release; this Dart snippet itself has not been run against a real app yet.
+On a `401`, call `refresh()` and repeat the request once. The HTTP calls are what `./smoke.sh` runs on every
+release; this Dart code itself has not been run against a real app yet.
 
 ## How generation works
 
