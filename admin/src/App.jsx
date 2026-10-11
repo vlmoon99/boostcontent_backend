@@ -5,8 +5,9 @@ import Overview from './pages/Overview.jsx'
 import Users from './pages/Users.jsx'
 import Posts from './pages/Posts.jsx'
 import Plans from './pages/Plans.jsx'
+import Promo from './pages/Promo.jsx'
 
-const TABS = { Overview, Users, Posts, Plans }
+const TABS = { Overview, Users, Posts, Plans, Promo }
 
 export default function App() {
   const [state, setState] = useState(null)       // {setup_needed}

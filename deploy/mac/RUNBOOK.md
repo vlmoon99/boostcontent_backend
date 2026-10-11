@@ -26,6 +26,14 @@ made counts. The owner's own accounts on the Mac are on `team` (1000 / 3000 / 3)
 `docker exec bc-db psql -U postgres -d boostcontent -c "update private.accounts set plan='team' where id='<id>'"`
 (`deploy/mac/adopt.sh list` shows the ids). A phone that signs up again is `free` until that is run for it.
 
+## Promo codes (2026-10-11)
+
+Owner console → tab **Promo** → "Create code" (default: `pro` for 30 days, no limit of accounts). Give the code
+to the tester; in the app it is entered in Settings → Plan → "Promo code". The console is at
+`http://127.0.0.1:3200` on the machine that serves (on the Sparks: the master's tailnet address, port 3200);
+its password is set on the first visit. Without the console:
+`docker exec bc-db psql -U postgres -d boostcontent -c "select code from admin_api.create_promo(days => 30, max_uses => 5, note => 'testers')"`
+
 ## Every day
 
 | I want to… | Where | Do this |

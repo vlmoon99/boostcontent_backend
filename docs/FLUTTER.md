@@ -203,6 +203,19 @@ round does not fit in what is left: ask for at most `left.posts` options and `le
 
 Move an account to another plan by hand: `update private.accounts set plan = 'pro' where id = '…';`
 
+### Promo codes
+
+`POST /rest/v1/rpc/redeem_promo` with `{"code": "BOOST-1A2B3C4D"}` (capitals and spaces around it do not
+matter) gives the account the code's plan for the code's number of days and answers like `me`, now with
+`plan: "pro"` and `plan_until` (the moment it ends; absent for a plan without an end). After that moment `me`
+says `free` again by itself. Errors: `promo_not_found` (404), `promo_expired` (409: stopped by the owner or
+past its date), `promo_already_used` (409: this account entered it before), `promo_used_up` (409: all its
+places are taken), `promo_not_needed` (409: the account has a plan without an end). Entering a second code
+for the same plan while the first still runs adds its days.
+
+The owner makes codes in the console, tab **Promo**: the plan it gives, the days, how many accounts may use
+it, until when it can be entered, a note, and optionally the code itself; "Stop" ends a code for new people.
+
 ### Privacy: where the text model runs
 
 `POST /rest/v1/rpc/privacy` (signed in, no arguments) says whether the model that reads the photos and writes the

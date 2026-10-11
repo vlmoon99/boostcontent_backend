@@ -19,6 +19,13 @@ function Quota({ a, onSaved, fail }) {
         <Button onClick={save}>Save</Button>
       </div>
       <p className="text-xs text-zinc-500">Empty = the plan's default.</p>
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <span>Plan now: <b>{a.plan_now}</b>{a.plan_until ? ` until ${fmt(a.plan_until)} (promo)` : ' (no end)'}</span>
+        {['free', 'pro', 'team'].map((p) => (
+          <Button key={p} kind="ghost" disabled={a.plan === p && !a.plan_until} onClick={() => api('rpc/set_quota', { method: 'POST', body: {
+            account_id: a.id, images_month: img === '' ? null : +img, posts_month: posts === '' ? null : +posts, plan: p } }).then(onSaved).catch(fail)}>Set {p}</Button>
+        ))}
+      </div>
     </div>
   )
 }
@@ -68,12 +75,13 @@ export default function Users({ onUnauthorized, userId, setUserId }) {
       <Err error={error} />
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
-          <thead className="text-left text-xs text-zinc-500"><tr><th className="py-1">user</th><th>last seen</th><th>businesses</th><th>posts</th><th>images (month)</th><th>posts (month)</th><th /></tr></thead>
+          <thead className="text-left text-xs text-zinc-500"><tr><th className="py-1">user</th><th>last seen</th><th>businesses</th><th>posts</th><th>plan</th><th>images (month)</th><th>posts (month)</th><th /></tr></thead>
           <tbody>
             {rows.map((a) => (
               <tr key={a.id} className="cursor-pointer border-t border-zinc-800 hover:bg-zinc-900" onClick={() => setUserId(a.id)}>
                 <td className="py-1.5 font-mono text-xs">{a.id.slice(0, 8)}{a.is_anonymous ? ' (guest)' : ''}</td>
                 <td className="text-zinc-400">{fmt(a.last_seen_at)}</td><td>{a.businesses}</td><td>{a.posts_total}</td>
+                <td>{a.plan_now}{a.plan_until ? ' (promo)' : ''}</td>
                 <td>{a.images_used_month} / {a.images_month}</td><td>{a.posts_used_month} / {a.posts_month}</td>
                 <td className="text-red-400">{a.blocked ? 'blocked' : ''}</td>
               </tr>
