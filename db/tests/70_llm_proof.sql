@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap;
-select plan(9);
+select plan(10);
 
 select set_config('request.jwt.claims', '{"sub":"00000000-0000-0000-0000-0000000000f7","role":"authenticated","is_anonymous":true}', true);
 update private.llm_proof set data = '{"tee": false}', checked_at = null, request_id = null;
@@ -25,6 +25,9 @@ insert into net._http_response (id, status_code, content) values (-7, 404, '{"de
 update private.llm_proof set request_id = -7, checked_at = now(), data = '{"tee":true}';
 select lives_ok('select private.refresh_llm_proof()', 'the answer is collected and the next question is sent');
 select is((select data from private.llm_proof), '{"tee": false}'::jsonb, 'an answer without a proof clears the claim');
+
+-- PostgREST calls a stable function in a read-only transaction, where noting "seen" would fail
+select is((select provolatile::text from pg_proc where oid = 'api.privacy()'::regprocedure), 'v', 'privacy() can be called over the API');
 
 select * from finish();
 rollback;

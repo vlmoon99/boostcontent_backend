@@ -39,8 +39,10 @@ begin
 end $$;
 revoke all on function private.refresh_llm_proof() from public;
 
+-- Not `stable`: current_account() notes that the account was seen, and PostgREST runs a stable function in a
+-- read-only transaction.
 create function api.privacy() returns jsonb
-language plpgsql stable security definer set search_path = private, public as $$
+language plpgsql security definer set search_path = private, public as $$
 declare
   p private.llm_proof;
   fresh boolean;
