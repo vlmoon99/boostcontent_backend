@@ -352,6 +352,15 @@ await api.deletePost(post['id']);
 second kind as "pick one" or filter them out with `chosen_at != null`. There is no "new" or "seen" state and no
 weekly batch: remove the "new posts this week" badge.
 
+### Keeping several options of a round
+
+`POST /rest/v1/rpc/choose_posts` with `{"post_ids": ["…", "…"]}` keeps every listed option and passes the rest of
+the round; it returns the kept posts. Each kept option costs one post, each passed one is given back, so the
+owner never loses a good option only because another one was better. All ids must be finished options of one
+open round: `not_found` (404), `bad_ids` (400: empty list or two rounds), `not_ready` (409), `already_chosen`
+(409: the round was decided before). Calling it again with options that are already kept returns them.
+`choose_post` (one option) still works and means the same as a list of one.
+
 ### Showing and saving pictures
 
 `photos[].url`, `posts[].images[].url` and the matching `download_url` are temporary links, **valid for 1 hour**.
