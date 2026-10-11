@@ -2,6 +2,7 @@
 # Choose who answers the model calls of the backend running on this Mac.
 #   deploy/mac/inference.sh sparks   # the Sparks' gateway over the tailnet (fast: big LLM, Qwen-Image-Edit)
 #   deploy/mac/inference.sh mac      # inference_system/hosts/mac on this machine (works with the Sparks off)
+#   deploy/mac/inference.sh cloud    # the same gateway on this Mac, when it sends the work to clouds (NEAR AI, Comfy Cloud)
 #   deploy/mac/inference.sh status
 # The backend, the database and the pictures stay on the Mac either way. With `sparks` the Mac's storage
 # is published on its tailnet address, because the Sparks fetch the photo and put the picture themselves.
@@ -22,15 +23,18 @@ case "${1:-status}" in
     put INFERENCE_URL "$first"; put INFERENCE_KEY "$key"; put INFERENCE_UPSTREAMS "\"$gateways\""
     put MAC_TAILNET_IP "$ip"; put S3_INTERNAL_ENDPOINT "http://$ip:3900"
     put MAC_LLM_CONCURRENCY 4; put MAC_IMAGE_CONCURRENCY 4; put MAC_IMAGES_PER_POST 3 ;;
-  mac)
+  mac|cloud)
     key=$(get MAC_INFERENCE_KEY); [ -n "$key" ] || { echo "MAC_INFERENCE_KEY is not in .env"; exit 1; }
     put INFERENCE_URL http://host.docker.internal:8000; put INFERENCE_KEY "$key"
     put INFERENCE_UPSTREAMS http://host.docker.internal:8000
     sed -i '' -e '/^MAC_TAILNET_IP=/d' .env; put S3_INTERNAL_ENDPOINT http://127.0.0.1:3900
-    put MAC_LLM_CONCURRENCY 2; put MAC_IMAGE_CONCURRENCY 2; put MAC_IMAGES_PER_POST 1 ;;
+    # `cloud`: the Mac's gateway hands the work to clouds (inference_system/hosts/mac: LLM_PROVIDER=nearai,
+    # IMAGE_PROVIDER=comfy_cloud), which render in parallel, so the Sparks' tuning applies, not one GPU's.
+    if [ "$1" = cloud ]; then put MAC_LLM_CONCURRENCY 4; put MAC_IMAGE_CONCURRENCY 4; put MAC_IMAGES_PER_POST 3
+    else put MAC_LLM_CONCURRENCY 2; put MAC_IMAGE_CONCURRENCY 2; put MAC_IMAGES_PER_POST 1; fi ;;
   status)
     echo "inference: $(get INFERENCE_URL)   storage for inference: $(get S3_INTERNAL_ENDPOINT)"; exit 0 ;;
-  *) echo "usage: $0 sparks|mac|status"; exit 1 ;;
+  *) echo "usage: $0 sparks|mac|cloud|status"; exit 1 ;;
 esac
 deploy/mac/up.sh "$(get PUBLIC_URL)" | tail -2
 echo "inference: $(get INFERENCE_URL)"

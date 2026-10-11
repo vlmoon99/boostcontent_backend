@@ -1,12 +1,23 @@
-# Runbook: what runs where, and what to do (updated 2026-10-10 21:35 UTC)
+# Runbook: what runs where, and what to do (updated 2026-10-11 13:50 UTC)
 
-**The Sparks are the server again.** `boostcontent.io` and `api.vramhouse.com` are answered by the two Sparks:
-database, pictures, captions and picture rendering. The Mac runs nothing: its backend, tunnel and models are
-stopped. It is a spare for the day the Sparks lose power.
+**The Sparks are off and the Mac is the server.** `boostcontent.io` and `api.vramhouse.com` point at the Mac's
+tunnel `bc-mac`. The Mac runs the database, the pictures' storage and the API in Docker Desktop; the models do
+not run on the Mac: captions are written on NEAR AI Cloud (in a TEE) and pictures are drawn on Comfy Cloud.
+Both keys are in `inference_system/hosts/mac/.env` (`NEARAI_API_KEY`, `COMFY_API_KEY`), with
+`LLM_PROVIDER`, `IMAGE_PROVIDER` and `IMAGE_QUALITY=low` (cheapest pictures; `medium`, `high`).
 
-What was moved at 21:25 UTC: the Mac's database (everything made since the power cut: accounts, items, posts)
-and its 82 pictures were copied to dgx-spark-2 (the master) and replicated to dgx-spark. The phone keeps its
-account: its sign-in was moved with the data.
+**The two databases have diverged.** The Mac's database is its copy from 2026-10-10 21:25 UTC plus everything
+made since 2026-10-11 13:40 UTC. The Sparks' database has what was made on them between those two moments.
+When the Sparks return, one of the two has to be chosen as the truth (see "Moving the data"); nothing merges
+them automatically. Until that is decided, **do not give the names back to the Sparks**, and do not start a
+second tunnel for them.
+
+A phone that last used the Sparks is signed out by the Mac (its sign-in is not in the Mac's copy) and starts
+as a new account. `deploy/mac/adopt.sh` gives such a new account an older account's data.
+
+To start the Mac after a restart: open Docker Desktop, then
+`( cd ../inference_system/hosts/mac && ./run.sh start )`, `deploy/mac/inference.sh cloud`,
+`deploy/mac/tunnel.sh named https://boostcontent.io`. The Mac must stay awake and online.
 
 ## Every day
 
@@ -23,8 +34,8 @@ Use this only to keep the app working; when the Sparks return, what was made on 
 moved back the same way (see "Moving the data" below), or it is lost.
 
 1. Open **Docker Desktop**, wait until it runs.
-2. In `inference_system/hosts/mac`: `./run.sh start` (the Mac's own models, about a minute)
-3. In `boostcontent_backend`: `deploy/mac/inference.sh mac`
+2. In `inference_system/hosts/mac`: `./run.sh start` (the models its `.env` names: the Mac's own, or the clouds)
+3. In `boostcontent_backend`: `deploy/mac/inference.sh mac` (`cloud` when the models are in the clouds)
 4. Point the names at the Mac and start its tunnel:
    ```
    cloudflared tunnel route dns --overwrite-dns bc-mac boostcontent.io

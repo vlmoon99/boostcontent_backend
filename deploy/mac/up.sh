@@ -14,7 +14,7 @@ cd "$(dirname "$0")/../.."
 dc() {
   local extra=()
   grep -qE '^MAC_TAILNET_IP=.+' .env 2>/dev/null && extra=(-f deploy/mac/compose.mac.tailnet.yaml)
-  docker compose -f compose.yaml -f deploy/mac/compose.mac.yaml "${extra[@]}" --profile master "$@"
+  docker compose -f compose.yaml -f deploy/mac/compose.mac.yaml ${extra[@]+"${extra[@]}"} --profile master "$@"
 }
 SERVICES="db migrate configure auth rest rest-admin garage caddy backup"
 

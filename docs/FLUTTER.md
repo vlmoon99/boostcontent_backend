@@ -182,6 +182,23 @@ await api.deleteAccount();
 await api.start();                   // a new, empty guest
 ```
 
+### Privacy: where the text model runs
+
+`POST /rest/v1/rpc/privacy` (signed in, no arguments) says whether the model that reads the photos and writes the
+captions runs inside a TEE, with the proof:
+
+```json
+{"llm": {"tee": true, "provider": "nearai", "model": "Qwen/Qwen3.6-35B-A3B-FP8",
+         "signing_address": "0xe5d0…", "intel_quote": "0400020081…", "has_nvidia_evidence": true,
+         "checked_at": "2026-10-11T13:42:42Z"}}
+```
+
+or `{"llm": {"tee": false}}`. The backend asks its inference gateway every 5 minutes and repeats the claim only
+while the answer is younger than 30 minutes, so show the note only when `tee` is true and never cache it.
+`intel_quote` is the Intel TDX quote as hex (about 10 kB): let the user copy it and paste it into a quote
+verifier (https://proof.t16z.com). `signing_address` is the key inside the enclave that signs the answers.
+Pictures are made by another service and are not covered by this.
+
 ### Businesses
 
 ```dart

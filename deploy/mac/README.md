@@ -45,6 +45,11 @@ deploy/mac/inference.sh mac      # everything on the Mac (inference_system/hosts
 deploy/mac/inference.sh status
 ```
 
+`deploy/mac/inference.sh cloud` is `mac` with the Sparks' tuning (4 + 4 jobs, up to 3 pictures per option): use it
+when the Mac's gateway sends the work to clouds (`inference_system/hosts/mac`: `LLM_PROVIDER=nearai`,
+`IMAGE_PROVIDER=comfy_cloud`, `IMAGE_QUALITY`). Which cloud, which model and which picture quality are settings
+of the inference system; the backend only knows one gateway address.
+
 With `sparks` Postgres calls the first gateway of `SPARK_GATEWAYS` with `SPARK_INFERENCE_KEY` (the Sparks' project
 key `boostcontent`); that gateway spreads the work over both Sparks. The Mac's storage also listens on its tailnet
 address (`compose.mac.tailnet.yaml`), because the Sparks fetch the product photo and put the picture themselves.
