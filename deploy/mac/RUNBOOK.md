@@ -1,37 +1,75 @@
-# Runbook: what runs where, and what to do (updated 2026-10-11 13:50 UTC)
+# Runbook: what runs where, and what to do (updated 2026-10-11 15:50 UTC)
 
-**The Sparks are off and the Mac is the server.** `boostcontent.io` and `api.vramhouse.com` point at the Mac's
-tunnel `bc-mac`. The Mac runs the database, the pictures' storage and the API in Docker Desktop; the models do
-not run on the Mac: captions are written on NEAR AI Cloud (in a TEE) and pictures are drawn on Comfy Cloud.
-Both keys are in `inference_system/hosts/mac/.env` (`NEARAI_API_KEY`, `COMFY_API_KEY`), with
-`LLM_PROVIDER`, `IMAGE_PROVIDER` and `IMAGE_QUALITY=low` (cheapest pictures; `medium`, `high`).
+**The Sparks are the server.** `boostcontent.io` and `api.vramhouse.com` point at the Sparks' tunnel
+(`test_ads_client`). dgx-spark-2 is the master (database, storage, API), dgx-spark the follower.
+**The models are not the Sparks' own:** the backend calls the cloud gateway on each Spark (`:8011`,
+`inference_system/hosts/cloud`), which sends text to NEAR AI and pictures to Comfy Cloud. The Sparks' own models
+still run next to it and can be used again with one command (below). The Mac runs nothing: it is a spare.
 
-**The two databases have diverged.** The Mac's database is its copy from 2026-10-10 21:25 UTC plus everything
-made since 2026-10-11 13:40 UTC. The Sparks' database has what was made on them between those two moments.
-When the Sparks return, one of the two has to be chosen as the truth (see "Moving the data"); nothing merges
-them automatically. Until that is decided, **do not give the names back to the Sparks**, and do not start a
-second tunnel for them.
+## Where the model calls go
 
-A phone that last used the Sparks is signed out by the Mac (its sign-in is not in the Mac's copy) and starts
-as a new account. `deploy/mac/adopt.sh` gives such a new account an older account's data.
+On **each** Spark, in `boostcontent_backend`:
 
-To start the Mac after a restart: open Docker Desktop, then
-`( cd ../inference_system/hosts/mac && ./run.sh start )`, `deploy/mac/inference.sh cloud`,
-`deploy/mac/tunnel.sh named https://boostcontent.io`. The Mac must stay awake and online.
+```
+deploy/inference.sh status   # cloud or own
+deploy/inference.sh own      # the Sparks' own models (free, no TEE note in the app)
+deploy/inference.sh cloud    # NEAR AI and Comfy Cloud (paid, the app shows the TEE note)
+```
+
+Picture quality on the clouds is `IMAGE_QUALITY` in `~/inference_cloud/hosts/cloud/.env` on each Spark
+(`low`, `medium`, `high`), applied with `docker compose up -d` in that folder. The two cloud keys are in the
+same file.
+
+## What was merged on 2026-10-11 15:40 UTC
+
+The Mac's database (everything since the afternoon: plans, promo codes, the accounts made on it) became the
+Sparks' database, and the two accounts that only the Sparks had up to date were put back into it from the
+Sparks' own copy: `eb743a59…` ("Urban Winter Wardrobe" and "Sport", 29 posts) and one smoke account. Nothing
+else differed. This month's usage of those two was set to zero like everyone's. The pictures made on the Mac
+(20 objects) were copied into the Sparks' storage.
+
+Kept on dgx-spark-2 in `~/bc-backups/`: `sparks-before-merge-20261011-1537.dump` (the Sparks as they were),
+`mac-final-20261011-1537.dump` (the Mac as it was) and `merge.sh` (what was run). The old Sparks data is also
+still a scratch database, `bc_spark_old`, on the master: drop it when nothing is missed
+(`docker exec bc-db psql -U postgres -c 'drop database bc_spark_old'`).
+
+## The Sparks lose power → the Mac takes over
+
+The Mac's database is its copy from 2026-10-11 15:37 UTC. Anything made on the Sparks after that is not in it;
+what is made on the Mac in between has to be merged back afterwards (as above), or it is lost.
+
+1. Open **Docker Desktop**, wait until it runs.
+2. In `inference_system/hosts/mac`: `./run.sh start` (its `.env` says clouds: no model runs on the Mac).
+3. In `boostcontent_backend`: `deploy/mac/inference.sh cloud`
+4. Point the names at the Mac and start its tunnel:
+   ```
+   cloudflared tunnel route dns --overwrite-dns bc-mac boostcontent.io
+   cloudflared --origincert ~/.cloudflared/cert-vramhouse.pem tunnel route dns --overwrite-dns bc-mac api.vramhouse.com
+   deploy/mac/tunnel.sh named https://boostcontent.io
+   ```
+   For a few minutes after a switch some requests still fail (Cloudflare error 1033) while the change spreads.
+
+## After a power cut, check the follower
+
+Three times now dgx-spark came back with `bc-db`, `bc-garage` and `inf-litellm-db` without a Docker network,
+and the watchdog does not heal that (`inference_system/docs/PROGRESS.md`). `deploy/node.sh status` then says
+"database not answering" on both nodes. Fix on dgx-spark:
+`docker compose --profile follower up -d --no-build --no-deps --force-recreate db garage` in boostcontent_backend
+and `docker compose up -d --no-build --no-deps --force-recreate litellm-db` in `inference_system/hosts/dgx-spark`.
 
 ## Plans (2026-10-11)
 
-New accounts are `free`: 12 options and 12 pictures a month, one picture per option, and every option that is
-made counts. The owner's own accounts on the Mac are on `team` (1000 / 3000 / 3), set by hand:
-`docker exec bc-db psql -U postgres -d boostcontent -c "update private.accounts set plan='team' where id='<id>'"`
-(`deploy/mac/adopt.sh list` shows the ids). A phone that signs up again is `free` until that is run for it.
+Every account is `free`: 12 options and 12 pictures a month, one picture per option, and every option that is
+made counts. `pro` (150 / 300 / 3, $20) is shown in the app but cannot be bought yet; `team` (1000 / 3000 / 3)
+is for the owner's own accounts. Change an account's plan in the console (Users → the user → "Set pro"), or
+give the tester a promo code.
 
 ## Promo codes (2026-10-11)
 
 Owner console → tab **Promo** → "Create code" (default: `pro` for 30 days, no limit of accounts). Give the code
 to the tester; in the app it is entered in Settings → Plan → "Promo code". The console is at
-`http://127.0.0.1:3200` on the machine that serves (on the Sparks: the master's tailnet address, port 3200);
-its password is set on the first visit. Without the console:
+`http://100.64.0.12:3200` from any machine on the tailnet (on the Mac, when it serves: `http://127.0.0.1:3200`);
+its password is set on the first visit. Without the console, on dgx-spark-2:
 `docker exec bc-db psql -U postgres -d boostcontent -c "select code from admin_api.create_promo(days => 30, max_uses => 5, note => 'testers')"`
 
 ## Every day
@@ -41,33 +79,6 @@ its password is set on the first visit. Without the console:
 | Use the app | iPhone | Just open it. It talks to `https://boostcontent.io` |
 | Check the Sparks | any machine on the tailnet | `ssh 100.64.0.12 'cd ~/boostcontent_backend && deploy/node.sh status'` → node1 MASTER, node0 follower, "streaming" |
 | Run the full self-test | on dgx-spark-2 | `cd ~/boostcontent_backend && ./smoke.sh` → `16 passed` (about a minute) |
-
-## The Sparks lost power → the Mac takes over (slower, and with OLD data)
-
-The Mac's database is a copy from 2026-10-10 21:25 UTC. Anything made on the Sparks after that is not in it.
-Use this only to keep the app working; when the Sparks return, what was made on the Mac in between has to be
-moved back the same way (see "Moving the data" below), or it is lost.
-
-1. Open **Docker Desktop**, wait until it runs.
-2. In `inference_system/hosts/mac`: `./run.sh start` (the models its `.env` names: the Mac's own, or the clouds)
-3. In `boostcontent_backend`: `deploy/mac/inference.sh mac` (`cloud` when the models are in the clouds)
-4. Point the names at the Mac and start its tunnel:
-   ```
-   cloudflared tunnel route dns --overwrite-dns bc-mac boostcontent.io
-   cloudflared --origincert ~/.cloudflared/cert-vramhouse.pem tunnel route dns --overwrite-dns bc-mac api.vramhouse.com
-   deploy/mac/tunnel.sh named https://boostcontent.io
-   ```
-
-## The Sparks are back → give them the names again
-
-```
-cloudflared tunnel route dns --overwrite-dns test_ads_client boostcontent.io
-cloudflared --origincert ~/.cloudflared/cert-vramhouse.pem tunnel route dns --overwrite-dns test_ads_client api.vramhouse.com
-deploy/mac/tunnel.sh stop && deploy/mac/up.sh down
-( cd ../inference_system/hosts/mac && ./run.sh stop )
-```
-
-Never let both tunnels serve at once: two machines with two databases must not answer for one name.
 
 ## Moving the data (what was done on 2026-10-10, for the next time)
 
