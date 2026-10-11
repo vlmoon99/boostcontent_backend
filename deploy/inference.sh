@@ -11,7 +11,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [ -f .env ] || { echo "no .env here"; exit 1; }
-get() { grep -E "^$1=" .env | head -1 | cut -d= -f2- | tr -d '"'; }
+get() { { grep -E "^$1=" .env || true; } | head -1 | cut -d= -f2- | tr -d '"'; }
 put() { if grep -qE "^$1=" .env; then sed -i -e "s#^$1=.*#$1=$2#" .env; else echo "$1=$2" >> .env; fi; }
 ip=$(get TAILNET_IP)
 cloud_url=$(get CLOUD_INFERENCE_URL); cloud_url=${cloud_url:-http://$ip:8011}
