@@ -700,8 +700,19 @@ class BcApi {
 
   /// Queues [n] OPTIONS for one post (1..10). Returns them with status `queued` and one shared `batch_id`.
   /// Show them side by side when they finish and call [choosePost] with the one the user keeps.
-  Future<List<Map<String, dynamic>>> generatePosts(String businessId, {int n = 3}) async =>
-      ((await rpc('generate_posts', {'business_id': businessId, 'n': n})) as List).cast<Map<String, dynamic>>();
+  /// Optional: [itemId] (a round about one market item), [about] (the owner's subject, 500 characters) and
+  /// [images] (pictures per option, 1 .. `me().limits.images_per_post`; out of range is clamped). With [images]
+  /// every option gets exactly that many pictures; without it the model decides, up to the plan's number.
+  Future<List<Map<String, dynamic>>> generatePosts(String businessId,
+          {int n = 3, String? itemId, String? about, int? images}) async =>
+      ((await rpc('generate_posts', {
+        'business_id': businessId,
+        'n': n,
+        if (itemId != null) 'item_id': itemId,
+        if (about != null) 'about': about,
+        if (images != null) 'images': images,
+      })) as List)
+          .cast<Map<String, dynamic>>();
 
   Future<List<Map<String, dynamic>>> batch(String batchId) =>
       list('posts', {'batch_id': 'eq.$batchId', 'order': 'created_at.asc'});
