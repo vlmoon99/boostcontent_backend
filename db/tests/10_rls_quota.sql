@@ -1,6 +1,8 @@
 begin;
 create extension if not exists pgtap;
 select plan(14);
+-- these tests were written for the generous limits; the real plans are checked in 90_plans.sql
+update private.plans set posts_month = 1000, images_month = 3000, images_per_post = 3 where id = 'free';
 
 create function pg_temp.as_user(u uuid) returns void language sql as $$
   select set_config('request.jwt.claims', json_build_object('sub', u, 'role', 'authenticated', 'is_anonymous', true)::text, true);

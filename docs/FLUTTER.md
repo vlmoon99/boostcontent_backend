@@ -182,6 +182,27 @@ await api.deleteAccount();
 await api.start();                   // a new, empty guest
 ```
 
+### Plans and what counts (2026-10-11)
+
+| Plan | Options a month | Pictures a month | Pictures per option | Price |
+|---|---|---|---|---|
+| `free` | 12 | 12 | 1 | free |
+| `pro` | 150 | 300 | 3 | $20 a month (not for sale yet: there are no payments) |
+| `team` | 1000 | 3000 | 3 | the owner's own accounts, never listed |
+
+`me` gives the account's plan, `limits` (`posts_month`, `images_month`, `images_per_post`), `used` and `left`.
+`POST /rest/v1/rpc/plans` lists the plans a user may see, cheapest first:
+`[{"id":"free","posts_month":12,"images_month":12,"images_per_post":1,"price_cents":0}, {"id":"pro",…,"price_cents":2000}]`.
+
+**The quota counts what was made.** An option that was written stays counted when the owner passes on it
+(`choose_post`, `choose_posts`) or discards the round, because its text and pictures were paid for. Given back:
+an option the model never wrote, pictures that had not started when the option was passed (they are cancelled),
+and anything that failed. So "Stop" in the first seconds of a round costs nothing, and a finished round of
+three costs three options whatever the owner keeps. `generate_posts` answers `quota_exceeded` (402) when the
+round does not fit in what is left: ask for at most `left.posts` options and `left.images / options` pictures each.
+
+Move an account to another plan by hand: `update private.accounts set plan = 'pro' where id = '…';`
+
 ### Privacy: where the text model runs
 
 `POST /rest/v1/rpc/privacy` (signed in, no arguments) says whether the model that reads the photos and writes the

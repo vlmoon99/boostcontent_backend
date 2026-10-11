@@ -1,6 +1,8 @@
 begin;
 create extension if not exists pgtap;
 select plan(12);
+-- these tests were written for the generous limits; the real plans are checked in 90_plans.sql
+update private.plans set posts_month = 1000, images_month = 3000, images_per_post = 3 where id = 'free';
 
 select is(private.json_loose('```json
 {"a": 1}

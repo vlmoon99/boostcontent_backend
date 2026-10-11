@@ -27,7 +27,7 @@ select is((select count(*)::int from private.posts where id in (select id from r
 select isnt((select passed_at from private.posts where id = (select id from r where n = 2)), null, 'the one that was not listed is passed');
 select is((select count(*)::int from private.signals where post_id in (select id from r) and kind = 'chosen'), 2, 'each kept option is a signal the backend learns from');
 select set_config('request.jwt.claims', '{"sub":"00000000-0000-0000-0000-0000000000f8","role":"authenticated","is_anonymous":true}', true);
-select is((api.me()->'used'->>'posts')::int, (select posts from before) + 3, 'two kept options cost two posts: the passed one is given back');
+select is((api.me()->'used'->>'posts')::int, (select posts from before) + 4, 'the passed option stays counted: it was made');
 
 select is((select count(*)::int from api.choose_posts(array[(select id from r where n = 3)])), 1, 'keeping a kept option again changes nothing');
 select throws_ok(format($$ select api.choose_posts(array[%L]::uuid[]) $$, (select id from r where n = 2)),

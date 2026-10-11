@@ -56,11 +56,12 @@ dc up -d --build $SERVICES
 scripts/garage-init.sh >/dev/null && echo "storage ready"
 
 # This Mac's own tuning, in this Mac's database only (the Sparks keep their defaults): one GPU renders one
-# picture at a time (~50 s each), so fewer jobs in flight and one picture per option instead of three.
+# picture at a time (~50 s each), so fewer jobs in flight; MAC_IMAGES_PER_POST=1 also caps every plan at one
+# picture per option (the plans' own numbers are never raised from here).
 docker exec -i bc-db psql -U postgres -d boostcontent -v ON_ERROR_STOP=1 -q <<SQL
 insert into private.settings(key, value) values
   ('llm_concurrency', '${MAC_LLM_CONCURRENCY:-2}'), ('image_concurrency', '${MAC_IMAGE_CONCURRENCY:-2}')
 on conflict (key) do update set value = excluded.value, updated_at = now();
-update private.plans set images_per_post = ${MAC_IMAGES_PER_POST:-1};
+update private.plans set images_per_post = least(images_per_post, ${MAC_IMAGES_PER_POST:-3});   -- only ever lowers a plan
 SQL
 echo "backend: $PUBLIC   (owner console: http://127.0.0.1:3200)"

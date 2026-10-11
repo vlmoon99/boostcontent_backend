@@ -1,6 +1,8 @@
 begin;
 create extension if not exists pgtap;
 select plan(41);
+-- these tests were written for the generous limits; the real plans are checked in 90_plans.sql
+update private.plans set posts_month = 1000, images_month = 3000, images_per_post = 3 where id = 'free';
 
 create function pg_temp.as_user(u uuid) returns void language sql as $$
   select set_config('request.jwt.claims', json_build_object('sub', u, 'role', 'authenticated', 'is_anonymous', true)::text, true);
@@ -72,15 +74,15 @@ update private.jobs set status = 'running' where id = (select min(j.id) from pri
 update private.post_images set status = 'rendering' where id = (select post_image_id from private.jobs where status = 'running' and kind = 'image' and account_id = '00000000-0000-0000-0000-0000000000d1');
 select isnt((api.choose_post((select id from private.posts where idea_en->>'angle' = 'story'))).chosen_at, null, 'the finished option is chosen');
 select is((select count(*)::int from private.posts where passed_at is not null and account_id = '00000000-0000-0000-0000-0000000000d1'), 2, 'the other two are passed');
-select is((api.me()->'used'->>'posts')::int, 1, 'the round costs one post');
-select is((api.me()->'used'->>'images')::int, 1, 'and the pictures of the chosen option only');
+select is((api.me()->'used'->>'posts')::int, 3, 'every option that was written stays counted, kept or not');
+select is((api.me()->'used'->>'images')::int, 2, 'pictures that were made or are being made stay counted; the three that had not started are given back');
 select is((select count(*)::int from private.jobs where kind = 'image' and status = 'queued' and account_id = '00000000-0000-0000-0000-0000000000d1'), 0, 'pictures that had not started are stopped');
 select is((select string_agg(kind, ',' order by kind) from private.signals where account_id = '00000000-0000-0000-0000-0000000000d1' and kind in ('chosen', 'passed')), 'chosen,passed,passed', 'the choice and the passes are recorded');
 select throws_ok(format($$ select api.choose_post(%L) $$, (select id from private.posts where idea_en->>'angle' = 'tip')), 'PT409', 'another option of this round was already chosen', 'one choice per round');
 select lives_ok(format($$ select api.choose_post(%L) $$, (select id from private.posts where idea_en->>'angle' = 'story')), 'choosing the same option again changes nothing');
--- the picture of a passed option fails later: nothing more is given back
+-- the picture of a passed option fails later: a failed picture is never counted
 select private.fail_job(j, 'test') from private.jobs j where j.kind = 'image' and j.status = 'running' and j.account_id = '00000000-0000-0000-0000-0000000000d1';
-select is((api.me()->'used'->>'images')::int, 1, 'a passed option''s failed picture is not given back twice');
+select is((api.me()->'used'->>'images')::int, 1, 'a passed option''s picture that fails is given back');
 
 -- the memory: a learn job reads the signals, its reply is stored, the next options are written from it
 select is((select count(*)::int from private.jobs where kind = 'learn' and status = 'queued' and account_id = '00000000-0000-0000-0000-0000000000d1'), 1, 'a learn job is queued');

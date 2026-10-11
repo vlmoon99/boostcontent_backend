@@ -19,6 +19,13 @@ To start the Mac after a restart: open Docker Desktop, then
 `( cd ../inference_system/hosts/mac && ./run.sh start )`, `deploy/mac/inference.sh cloud`,
 `deploy/mac/tunnel.sh named https://boostcontent.io`. The Mac must stay awake and online.
 
+## Plans (2026-10-11)
+
+New accounts are `free`: 12 options and 12 pictures a month, one picture per option, and every option that is
+made counts. The owner's own accounts on the Mac are on `team` (1000 / 3000 / 3), set by hand:
+`docker exec bc-db psql -U postgres -d boostcontent -c "update private.accounts set plan='team' where id='<id>'"`
+(`deploy/mac/adopt.sh list` shows the ids). A phone that signs up again is `free` until that is run for it.
+
 ## Every day
 
 | I want to… | Where | Do this |
